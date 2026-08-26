@@ -8,7 +8,11 @@ dist/
 .pytest_cache/
 .coverage
 htmlcov/
+# Every local env variant, not just `.env` - `.env.local` held real keys
+# and matched nothing here, so one `git add -A` would have published them.
 .env
+.env.*
+!.env.example
 # Anchored to repo root ONLY — Manim's own generated output dirs, not
 # src/code2shorts/media/ (a real Phase 4 source package that otherwise
 # collides with this pattern; git's default media/ matches any depth).

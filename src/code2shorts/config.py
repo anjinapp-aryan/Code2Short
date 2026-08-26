@@ -2,16 +2,32 @@
 
 from __future__ import annotations
 
+from pydantic import AliasChoices, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    # `.env.local` is read AFTER `.env`, so it wins — it is the conventional
+    # place for a developer's real keys, and it is gitignored. Both files
+    # are optional; nothing here requires either to exist.
     model_config = SettingsConfigDict(
-        env_prefix="CODE2SHORTS_", env_file=".env", extra="ignore"
+        env_prefix="CODE2SHORTS_",
+        env_file=(".env", ".env.local"),
+        extra="ignore",
     )
 
-    llm_provider: str = "mock"
-    llm_model: str = "llama3.1"
+    # A few settings accept the vendor's conventional unprefixed name as
+    # well as the CODE2SHORTS_ one, because that is what people actually
+    # have in a .env.local and what other tools set. The prefixed form is
+    # listed first and therefore wins.
+    llm_provider: str = Field(
+        default="mock",
+        validation_alias=AliasChoices("CODE2SHORTS_LLM_PROVIDER", "LLM_PROVIDER"),
+    )
+    llm_model: str = Field(
+        default="llama3.1",
+        validation_alias=AliasChoices("CODE2SHORTS_LLM_MODEL", "LLM_MODEL"),
+    )
     execution_timeout_seconds: float = 10.0
     build_timeout_seconds: float = 120.0
     java_home: str | None = None
@@ -38,10 +54,28 @@ class Settings(BaseSettings):
     # ai/providers/factory.py; nothing above that seam sees these values.
     # Defaults to "mock" so nothing silently requires credentials.
     llm_base_url: str | None = None
-    llm_api_key: str | None = None
+    llm_api_key: SecretStr | None = None
 
-    gemini_api_key: str | None = None
-    gemini_model: str = "gemini-1.5-flash"
+    gemini_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("CODE2SHORTS_GEMINI_API_KEY", "GEMINI_API_KEY"),
+    )
+    gemini_model: str = Field(
+        default="gemini-1.5-flash",
+        validation_alias=AliasChoices("CODE2SHORTS_GEMINI_MODEL", "GEMINI_MODEL"),
+    )
+
+    # xAI/Grok needs no provider class: api.x.ai speaks the OpenAI wire
+    # format, so it is one more `base_url` (ADR-5.1). Its key is separate
+    # from `llm_api_key` only so both can sit in one .env.local.
+    xai_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("CODE2SHORTS_XAI_API_KEY", "XAI_API_KEY"),
+    )
+    xai_model: str = Field(
+        default="grok-4.1-fast",
+        validation_alias=AliasChoices("CODE2SHORTS_XAI_MODEL", "GROK_MODEL", "XAI_MODEL"),
+    )
     ai_timeout_seconds: float = 30.0
     ai_max_retries: int = 2
     ai_max_repair_attempts: int = 2
@@ -57,6 +91,21 @@ class Settings(BaseSettings):
 
     feature_ai_explanation_enabled: bool = True
     feature_rendering_enabled: bool = True
+
+
+def reveal(secret: SecretStr | str | None) -> str | None:
+    """Unwrap a credential at the one moment it is actually needed.
+
+    Credential fields are `SecretStr` so that printing a `Settings` object —
+    a pytest assertion diff, a debug log, a traceback — renders
+    `SecretStr('**********')` instead of the key. A real key was leaked into
+    test output exactly that way before this existed.
+
+    Call this only where the value goes on the wire.
+    """
+    if secret is None:
+        return None
+    return secret.get_secret_value() if isinstance(secret, SecretStr) else secret
 
 
 def get_settings() -> Settings:

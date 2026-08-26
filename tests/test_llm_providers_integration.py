@@ -89,11 +89,26 @@ requires_gateway = pytest.mark.skipif(
     ),
 )
 
+def _has_gemini_key() -> bool:
+    """Ask Settings, not os.environ.
+
+    A developer's key normally lives in `.env.local`, which `Settings`
+    reads and `os.environ` knows nothing about. Guarding on the raw
+    environment made this test skip while the pipeline itself was perfectly
+    able to call Gemini — a skip that misreported the real capability.
+    """
+    try:
+        return bool(Settings().gemini_api_key)
+    except Exception:  # noqa: BLE001 - a broken config is a legitimate skip
+        return False
+
+
 requires_gemini_key = pytest.mark.skipif(
-    not (os.environ.get("CODE2SHORTS_GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")),
+    not _has_gemini_key(),
     reason=(
         "NO GEMINI CREDENTIAL. This test did NOT pass — it was not run. "
-        "Set CODE2SHORTS_GEMINI_API_KEY to exercise the direct Gemini path."
+        "Set CODE2SHORTS_GEMINI_API_KEY (or GEMINI_API_KEY, including in "
+        ".env.local) to exercise the direct Gemini path."
     ),
 )
 

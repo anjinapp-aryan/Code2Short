@@ -173,12 +173,23 @@ def test_failures_are_structured_and_identify_the_stage() -> None:
 
 
 def test_no_secret_is_logged_or_defaulted_in_config() -> None:
+    """No credential field may carry a hardcoded default.
+
+    This inspects the FIELD DEFINITION, not a resolved `Settings()` value.
+    It used to assert `Settings().gemini_api_key is None`, which conflated
+    "the class ships a default" with "this machine has no key configured" —
+    so it failed the moment a developer put a real key in `.env.local`, and
+    its assertion message printed that key into the pytest output. Never
+    compare a secret in an assertion: the diff renders the value.
+    """
     from code2shorts.config import Settings
 
-    settings = Settings()
-    assert settings.gemini_api_key is None, "an API key must never have a default"
+    for name in ("gemini_api_key", "llm_api_key", "xai_api_key"):
+        field = Settings.model_fields[name]
+        assert field.default is None, f"{name} must never have a default value"
+
     source = inspect.getsource(Settings)
-    assert "sk-" not in source and "AIza" not in source
+    assert "sk-" not in source and "AIza" not in source and "gsk_" not in source
 
 
 def test_gemini_provider_never_logs_the_key() -> None:
@@ -279,3 +290,23 @@ def test_regression_trace_repr_renders_array_contents_not_identity_hash() -> Non
     ).read_text(encoding="utf-8")
     assert "Arrays.toString" in runtime
     assert "public static String repr(int[] value)" in runtime
+
+
+def test_printing_settings_can_never_expose_a_key() -> None:
+    """Regression: a real key reached pytest output through an assertion
+    diff, because credential fields were plain strings and pytest renders
+    the compared value. They are SecretStr now, so every accidental render
+    path - repr, str, model_dump, a traceback - shows a mask instead."""
+    from code2shorts.config import Settings, reveal
+
+    canary = "AQ.this-must-never-be-rendered-anywhere"
+    settings = Settings(
+        gemini_api_key=canary, llm_api_key=canary, xai_api_key=canary
+    )
+
+    for rendering in (repr(settings), str(settings), str(settings.model_dump())):
+        assert canary not in rendering
+
+    # ...and it is still usable where it actually has to be.
+    assert reveal(settings.gemini_api_key) == canary
+    assert reveal(None) is None
