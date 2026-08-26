@@ -1,0 +1,25 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+.env
+# Anchored to repo root ONLY — Manim's own generated output dirs, not
+# src/code2shorts/media/ (a real Phase 4 source package that otherwise
+# collides with this pattern; git's default media/ matches any depth).
+/media/
+/output/
+*.mp4
+!Reverse_String.mp4
+.mypy_cache/
+.ruff_cache/
+
+# Java build artifacts (tools/java-instrumenter and any generated Maven
+# workspaces) — never commit compiled output, only source.
+target/
+dependency-reduced-pom.xml

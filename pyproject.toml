@@ -1,0 +1,45 @@
+[project]
+name = "code2shorts"
+version = "0.1.0"
+description = "Generate accurate short-form educational programming videos from a topic, via structured lesson specs and deterministic Manim rendering."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "typer>=0.12",
+    "litellm>=1.40",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+]
+render = [
+    # Manim pulls in PyAV, which code2shorts.media.probe uses to read real
+    # video metadata (imageio-ffmpeg ships `ffmpeg` but no `ffprobe`).
+    "manim>=0.19.0",
+    # A real, static FFmpeg binary. Must be reachable as `ffmpeg` on PATH —
+    # see docs/PHASE_4_1_REAL_RENDER.md for the one-line Windows setup.
+    "imageio-ffmpeg>=0.5",
+]
+
+[project.scripts]
+code2shorts = "code2shorts.cli:app"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+    "integration: spawns real mvn/java subprocesses; requires Maven + JDK 17 on PATH",
+    "real_render: invokes real Manim + FFmpeg subprocesses; auto-skipped when either is missing (see tests/test_real_render.py)",
+]
