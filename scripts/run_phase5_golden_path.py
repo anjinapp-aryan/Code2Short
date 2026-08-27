@@ -47,12 +47,14 @@ from code2shorts.narration import (  # noqa: E402
     fit_plan_to_narration,
     validate_alignment,
     validate_srt,
+    validate_teaching_synchronization,
 )
 from code2shorts.narration.subtitles import write_srt  # noqa: E402
 from code2shorts.visualization import ManimVideoRenderer, RenderContext  # noqa: E402
 from code2shorts.workflow import (  # noqa: E402
     Code2ShortsState,
     CompileNode,
+    EducationalPlanNode,
     ExplainNode,
     NarrationNode,
     TraceNode,
@@ -105,6 +107,47 @@ def _mock_responses(algo: str):
             referenced_trace_event_indices=idx[:1],
         ).model_dump_json()
 
+    def education(prompt: str) -> str:
+        """A deterministic lesson built FROM the prompt's real indices, so
+        it cites only events that actually happened. Covers exactly the
+        concepts this trace's shape requires — no duration reasoning."""
+        from code2shorts.ai.contracts import (
+            ClaimKind,
+            EducationalMoment,
+            EducationalPlanResponse,
+            LearningConcept,
+        )
+
+        idx = indices(prompt) or [0]
+        # The prompt names the required concepts; parse them back rather
+        # than hardcoding, so this mock tracks the rubric automatically.
+        required = [
+            concept
+            for concept in LearningConcept
+            if f"{concept.value}," in prompt or f"{concept.value}\n" in prompt
+        ] or [LearningConcept.CORE_CONCEPT]
+
+        moments = []
+        for i, concept in enumerate(required):
+            moments.append(
+                EducationalMoment(
+                    id=f"m{i}",
+                    concept=concept,
+                    claim_kind=ClaimKind.EXPLANATION,
+                    explanation=f"{concept.value.replace('_', ' ')} for "
+                                f"{algo.replace('_', ' ')}",
+                    narration=f"Here we cover {concept.value.replace('_', ' ')}.",
+                    evidence_event_indices=[idx[min(i, len(idx) - 1)]],
+                    prerequisite_ids=[f"m{i - 1}"] if i else [],
+                )
+            )
+        return EducationalPlanResponse(
+            lesson_title=algo.replace("_", " ").title(),
+            problem_statement=f"how {algo.replace('_', ' ')} works",
+            moments=moments,
+            time_complexity="O(n)",
+        ).model_dump_json()
+
     captured: dict = {}
 
     def plan(prompt: str) -> str:
@@ -135,7 +178,7 @@ def _mock_responses(algo: str):
             ]
         ).model_dump_json()
 
-    return explanation, plan, narration
+    return explanation, education, plan, narration
 
 
 def main() -> int:
@@ -170,14 +213,15 @@ def main() -> int:
 
     # --- build the provider(s). One seam; no provider-specific branching. --
     if args.provider == "mock":
-        explanation_fn, plan_fn, narration_fn = _mock_responses(args.algorithm)
+        explanation_fn, education_fn, plan_fn, narration_fn = _mock_responses(args.algorithm)
         explain_provider = build_llm_provider(settings, canned_response=explanation_fn)
+        education_provider = build_llm_provider(settings, canned_response=education_fn)
         plan_provider = build_llm_provider(settings, canned_response=plan_fn)
         narration_provider = build_llm_provider(settings, canned_response=narration_fn)
         print(f"LLM provider: mock (deterministic, credential-free)")
     else:
         shared = build_llm_provider(settings, **overrides)
-        explain_provider = plan_provider = narration_provider = shared
+        explain_provider = education_provider = plan_provider = narration_provider = shared
         describe = getattr(shared, "describe", {"provider": args.provider})
         print(f"LLM provider: {describe}")
 
@@ -189,6 +233,9 @@ def main() -> int:
             TraceNode(),
             ExplainNode(explain_provider, provider_name=args.provider,
                         model=args.model or "default", max_repair_attempts=2),
+            # Phase 5.3: plan the LESSON before planning the visuals.
+            EducationalPlanNode(education_provider, provider_name=args.provider,
+                                model=args.model or "default", max_repair_attempts=2),
             VisualizationPlanNode(plan_provider, provider_name=args.provider,
                                   model=args.model or "default", max_repair_attempts=2),
             NarrationNode(narration_provider, provider_name=args.provider,
@@ -222,6 +269,29 @@ def main() -> int:
 
     trace = __import__("code2shorts.core.models", fromlist=["ExecutionTrace"]).ExecutionTrace
     trace = trace.model_validate(store.get(ids["trace"]).content)
+    if "educational_plan" in ids:
+        from code2shorts.ai.contracts import EducationalPlanResponse
+        from code2shorts.ai.education import evaluate_learning_completeness
+
+        lesson = EducationalPlanResponse.model_validate(
+            store.get(ids["educational_plan"]).content
+        )
+        completeness = evaluate_learning_completeness(lesson, trace)
+        kinds: dict[str, int] = {}
+        grounded = 0
+        for moment in lesson.moments:
+            kinds[moment.claim_kind.value] = kinds.get(moment.claim_kind.value, 0) + 1
+            if moment.evidence_event_indices:
+                grounded += 1
+        print(f"lesson: {lesson.lesson_title!r} — {len(lesson.moments)} moments, "
+              f"{grounded} carrying trace evidence, claims={kinds}")
+        print(f"  shapes   : {[s.value for s in completeness.shapes]}")
+        print(f"  covered  : {[c.value for c in completeness.covered]}")
+        print(f"  missing  : {[c.value for c in completeness.missing] or 'none'}")
+        print(f"  narration words: {completeness.estimated_narration_words} "
+              f"(informational only — never a pass/fail criterion, ADR-5.11)")
+        print(f"  completeness: {'PASS' if completeness.passed else 'FAIL'}")
+
     plan = VisualizationPlanResponse.model_validate(store.get(ids["visualization_plan"]).content)
     narration = NarrationResponse.model_validate(store.get(ids["narration"]).content)
     print(f"trace: {len(trace.events)} events, {arg!r} -> {trace.output!r} (expected {expected!r})")
@@ -256,6 +326,12 @@ def main() -> int:
     check = validate_alignment(alignment, plan)
     print(f"alignment: {len(alignment.segments)} segments, overflow={alignment.overflow_count} "
           f"{'OK' if check.passed else 'WARN ' + str(check.errors)}")
+    # Semantic synchronization: matching total durations proves nothing
+    # about teaching. This asserts each spoken segment occupies exactly
+    # the visual moment it describes.
+    sync = validate_teaching_synchronization(alignment, plan, trace)
+    print(f"teaching sync    : {'PASS' if sync.passed else 'FAIL ' + str(sync.errors[:3])}")
+
     srt_path = write_srt(alignment, out / "subtitles.srt")
     print(f"subtitles: valid={validate_srt(srt_path.read_text(encoding='utf-8')).passed}")
 

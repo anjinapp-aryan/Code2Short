@@ -111,7 +111,7 @@ def test_provider_selection_lives_only_in_the_factory() -> None:
         if path == factory or "providers" in path.parts:
             continue
         text = path.read_text(encoding="utf-8")
-        for needle in ("omniroute", "OmniRoute"):
+        for needle in ("omniroute", "OmniRoute", "api.x.ai", "x.ai"):
             # a comment mentioning it is fine; a code reference is not
             tree = ast.parse(text)
             for node in ast.walk(tree):

@@ -1277,3 +1277,453 @@ prohibitions hold. Durations are measured from real TTS output, never
 estimated. The model's proposal is a floor, so deliberate pacing survives
 and only the impossible part is corrected. After fitting, real runs report
 overflow 0 and `validate_timeline` PASS.
+
+### ADR-5.8 Environment-switched configuration; production reads no dotenv file
+
+**Status:** Accepted.
+
+**Context.** `Settings` read `.env` and `.env.local` relative to the
+*working directory*. Two consequences, both observed rather than
+theoretical: the unit suite loaded a developer's real keys (pytest runs
+with the repo as CWD), and a production process started inside a checkout
+would have inherited `.env.local` and run on a personal credential.
+
+**Decision.** `CODE2SHORTS_ENV` selects which files may be read, and
+nothing else: `local` (default) reads `.env` then `.env.local`; `test`,
+`ci`, `production` and `prod` read **none**. Resolved per instantiation,
+not at import, so setting the variable is honoured without reimporting.
+
+**Consequences.** Production is file-free by construction rather than by a
+rule nobody can enforce — there is no file for it to find. Precedence
+stays `process environment > env files > defaults`, verified in real
+subprocesses. `tests/conftest.py` sets `CODE2SHORTS_ENV=test` for every
+non-`integration` test, so the unit suite is credential-free on every
+machine; integration tests are untouched, because reaching a real provider
+is their purpose.
+
+**Rejected:** documenting "do not deploy from a checkout" (unenforceable);
+`python-dotenv` directly (pydantic-settings already wraps it); a
+configuration framework such as dynaconf or hydra (a dependency for one
+class); a cloud secret-manager SDK (binds the app to one platform for
+something the platform already does through environment variables).
+
+### ADR-5.9 Credentials are SecretStr; classification is advisory
+
+**Status:** Accepted.
+
+**Context.** A real API key was printed into pytest output. A test asserted
+`Settings().gemini_api_key is None` — conflating "the class ships a
+default" with "this machine has no key" — and pytest renders the compared
+value in its assertion diff. Separately, a `gsk_` credential (a **Groq**
+prefix) was configured as `XAI_API_KEY`, and api.x.ai's reply,
+"Incorrect API key provided", reads like an expired key rather than the
+wrong vendor entirely.
+
+**Decision.** Credential fields are `SecretStr`, so `repr`, `str`,
+`model_dump`, `model_dump_json` and tracebacks render a mask;
+`config.reveal()` unwraps only at the provider-factory call sites where the
+value goes on the wire. `config.classify_credential()` names the vendor a
+credential *looks* like from its prefix, returning a label and never a
+value.
+
+**Consequences.** Accidental rendering can no longer expose a key, and
+tests assert that for provenance, artifacts, workflow state, exceptions,
+logs and prompts. Classification is **advisory and deliberately not
+enforced by the factory**: prefixes are vendor conventions, not guarantees,
+and hard-rejecting on one would break the day a vendor changes its format.
+Its job is to stop a confident-but-wrong diagnosis — the integration test
+now reports *"credential is not an xAI credential… its prefix identifies it
+as 'groq'"* instead of a vague auth failure.
+
+### ADR-5.10 No automatic runtime provider failover
+
+**Status:** Accepted (deferred implementation, deliberately).
+
+**Context.** `LLM_FALLBACK_PROVIDER` exists in the configuration contract,
+and free-tier providers fail often enough to make automatic failover
+tempting: Gemini's free tier allows 20 requests/day, and the OmniRoute
+gateway exhausts its upstreams and answers HTTP 400.
+
+**Decision.** The variable is **read and validated** — declaring a fallback
+whose credential is absent fails at startup — but **no runtime failover is
+implemented**. A provider that cannot answer raises.
+
+**Consequences.** Artifact lineage stays truthful. Silently switching
+provider mid-run would record a `producer` that did not produce the
+artifact, and would hide a failing primary behind a quiet success. Given
+that lineage is load-bearing in this architecture, that is a decision to
+take explicitly, not a side effect of reading a config key.
+
+Locked by tests: configuring a fallback does not change which provider is
+built; a failing provider raises rather than substituting; and an AST sweep
+fails the build if `build_llm_provider` is ever called outside the factory
+seam, which is how a failover path would have to be introduced.
+
+**If it is ever implemented**, it must be explicitly configured, visible in
+execution metadata, preserve lineage, record the actual producer, never
+hide primary failure, be bounded, and have tests proving deterministic
+provider identity.
+
+---
+
+## Phase 5.3 — Educational story planning
+
+### ADR-5.11 Educational Integrity Over Duration
+
+**Status:** Accepted. **This is a product principle, not a tuning knob.**
+
+**The principle.**
+
+> Code2Shorts prioritizes execution correctness, learner comprehension,
+> and visual clarity over arbitrary video-duration targets.
+>
+> The system MUST NOT remove an execution state, explanation, or
+> conceptual transition solely to satisfy a duration constraint.
+>
+> Any future compression must be trace-grounded and must preserve
+> pedagogically necessary transitions.
+>
+> A longer video that teaches correctly is preferable to a shorter video
+> that causes the viewer to misunderstand the algorithm.
+
+Duration is **secondary**. Learning quality is **primary**.
+
+**Context.** Real runs produce 109–384 s videos where short-form platforms
+want under 60 s. The obvious lever — cap the step count, or drop the
+least "interesting" events — is precisely the lever that breaks the
+product. The value here is that every frame is derived from a real JVM
+execution; a video that omits the transition where the invariant is
+established is not a shorter lesson, it is a wrong one.
+
+**Decision.** No duration or step budget exists anywhere in the
+educational layer. `EducationalPlanResponse` has **no duration field** —
+there is nothing to optimise against. Completeness is judged by concept
+coverage, never by length.
+
+**Consequences.**
+* `validate_learning_completeness` fails a plan for *missing understanding*
+  (a required concept never taught; a moment with neither narration nor
+  explanation) and never for being long.
+* `LearningCompleteness.estimated_narration_words` is reported for
+  diagnostics and is explicitly not a pass/fail input.
+* Redundant events may be **identified** and summarised into one moment —
+  twenty identical loop checks need not be twenty moments — but the
+  conceptual boundaries survive: the first check teaches "we continue
+  while…", the last teaches "we stop because…".
+* Locked structurally: a test parses the AST of `ai/education.py` and
+  `ai/grounding.py` and fails the build if a `MAX_*`/`TARGET_*` budget or a
+  `len(...) > limit` comparison appears. Another test asserts a 200-moment
+  plan passes.
+
+**The gate question** is not "is this short?" but "does this teach the
+algorithm clearly, correctly and visually?" A correct three-minute video
+passes; a misleading forty-five-second one fails.
+
+### ADR-5.12 Observed facts and explanations are different kinds of claim
+
+**Status:** Accepted.
+
+**Context.** An LLM asked to explain an execution will happily write
+"fast = 3" whether or not any event says so, and a fabricated value is
+indistinguishable from a real one in prose. But requiring trace evidence
+for *every* sentence is equally wrong: there is no trace event for "why
+the pointer moves", so demanding one would force the model to attach
+irrelevant evidence to reasoning.
+
+**Decision.** `ClaimKind` splits them at the schema level:
+`OBSERVED` (asserts runtime state — **requires** evidence, and stated
+values are checked against the cited events), `EXPLANATION` (why the
+algorithm behaves this way — grounded in source and semantics),
+`COMMENTARY` (motivation, complexity, analogy).
+
+**Consequences.** `ai/grounding.py` enforces evidence only where evidence
+is meaningful. Two defects were found by its own tests while building it:
+matching English "is" as an assignment rejected the valid explanation
+"left is less than right", and a value pattern of `\w+` silently skipped
+quoted chars, letting a fabricated `chars[7] = 'Z'` through. Both fixed;
+both now regression-locked.
+
+The LLM is an **educational planner**: it may answer "which observed
+transitions matter?" and may not answer "what was the value of nums[3]?"
+unless the supplied trace says so.
+
+### ADR-5.13 Required concepts are derived from the trace's shape
+
+**Status:** Accepted.
+
+**Context.** Different algorithms must teach different things — a
+two-pointer swap and a scalar computation do not share a checklist — but
+branching on the algorithm's *name* would reintroduce exactly the
+algorithm-specific coupling the visualization layer is forbidden to have.
+
+**Decision.** `detect_algorithm_shapes()` classifies an execution
+structurally from the trace alone (`POINTER_TRAVERSAL`, `ARRAY_MUTATION`,
+`SCALAR_COMPUTATION`), and required concepts are the union of a universal
+set with each detected shape's set. No algorithm name is ever consulted.
+
+**Consequences.** A scalar computation is not failed for never teaching
+`POINTER_MOVEMENT`. Adding a new algorithm requires no change here; adding
+a genuinely new *shape* is one entry in a table.
+
+---
+
+## Phase 6A — data-structure visualization reuse decision
+
+### ADR-6.1 Observed state, not author-issued visualization commands
+
+**Status:** Accepted. Research-only phase; no implementation.
+
+**Context.** Phase 6 was expected to choose a data-structure
+visualization library for HashMap, Stack, Queue and Binary Search. Six
+candidates were audited with licences verified from authoritative sources
+(docs/PHASE_6A_REUSE_AUDIT.md).
+
+**Finding.** Every candidate that can draw a HashMap is driven by
+**author-issued commands** — Algorithm Visualizer's own documentation says
+its tracers "extract visualizing commands from code"; `manim-dsa` and
+`manim-data-structures` take the contents as constructor arguments. The
+only observed-state project, Python Tutor's Java backend, is **AGPL-3.0**
+and unusable as code.
+
+**Decision.** Reject all of them as dependencies. Code2Shorts keeps the
+observed-state model: a frame is true because the JVM did it.
+
+**Consequences.** Adopting an author-command tracer would invert the
+project's central guarantee — state would be true because someone wrote a
+call saying so, and an LLM emitting those calls could assert values that
+never occurred. That is the failure mode ADR-5.12 exists to prevent, so
+no such API may be introduced even internally. `manim-dsa` (stack visual
+semantics), `manim-data-structures` (array pointer/window semantics) and
+Python Tutor (heap-snapshot-per-step model) are REFERENCE only. VisuAlgo
+is proprietary and forbids forks and derivatives; it may be looked at,
+never copied. **Zero dependencies added; `pyproject.toml` unchanged.**
+
+### ADR-6.2 The gap is instrumentation, not visualization
+
+**Status:** Accepted.
+
+**Context.** Before judging any renderer, the current tracer was run
+against three real Java programs.
+
+**Evidence.** With a real `HashMap`, the variable is captured **once, as
+`{}`**; with a real `ArrayDeque`, **once, as `[]`**. Every `put`, `push`
+and `pop` produces no event, because the instrumenter emits on assignments
+and array subscripts and these are method calls. The programs ran
+correctly (`0,1` and `true`) — the execution is fine; the *observation* is
+not. Binary search, by contrast, is already fully observed: `low`, `mid`,
+`high` as scalars, `nums` as an array, `ARRAY_READ` and
+`CONDITION_EVALUATED` for the comparisons.
+
+**Decision.** Phase 6 starts with the **trace**, not the renderer. No
+visual work until a real trace shows non-empty, changing collection
+contents.
+
+**Consequences.** A renderer fed today's trace would faithfully draw an
+empty HashMap while the algorithm solves the problem — worse than drawing
+nothing. The minimum extension is to re-`repr` a collection variable after
+a statement that may mutate it and emit the **existing**
+`VARIABLE_ASSIGN` event: no new `TraceEventType`, no new `TraceEvent`
+field, no change to `ExecutionTrace` semantics, because `repr(Object)` and
+`assign(...)` already exist.
+
+**Open risk, unresolved by design:** `Map.toString()` iteration order is
+not guaranteed by the JLS, and ADR-005 rejects nondeterminism outright.
+This must be settled — prefer `LinkedHashMap`, sort keys for display, or
+explicitly accept and document per-JDK determinism — before HashMap
+visuals ship. Reflecting into bucket internals is deferred: JDK-fragile,
+a reflection surface, and unnecessary to teach what the algorithm does.
+
+### ADR-6.3 Two generic snapshots, not four; no SearchState
+
+**Status:** Accepted (design decision; not implemented).
+
+**Context.** The proposed Phase 6 architecture had four leaves:
+`ArraySnapshot`, `MapSnapshot`, `StackSnapshot`, `SearchState`.
+
+**Decision.** Add **`MapSnapshot`** and **`SequenceSnapshot`** only.
+
+**Consequences.** `SearchState` is dropped: binary search is already
+representable with existing array + scalar + pointer state, so the type
+would encode an *algorithm*, not a data structure — the thing this project
+forbids. `StackSnapshot` and `QueueSnapshot` are merged: both are ordered
+sequences whose interesting property is which end was just touched, that
+end is observable, and an `ArrayDeque` is literally the same object used
+two ways — two types would force the mapper to guess the author's intent,
+and guessing intent is what an observed-state system must not do.
+
+No `HashMapVisualizationEngine` / `StackVisualizationEngine` /
+`BinarySearchVisualizationEngine`. The renderer continues to dispatch on
+**what state is present**, never on what the algorithm is called, and the
+existing no-algorithm-branch test should be extended to fail on any
+branch keyed by an algorithm or structure name.
+
+### ADR-6.4 Deterministic collection ordering
+
+**Status:** Accepted. Implemented in Phase 6.
+
+**Context.** `HashMap`'s iteration order is **not guaranteed by the JLS**,
+and ADR-005 rejects nondeterminism outright. Emitting `Map.toString()`
+would therefore risk two runs of the same program producing two different
+videos — and, worse, would present whatever order came out as if it meant
+something.
+
+**Decision.** The observed order is either semantic or canonical, and the
+trace always says which:
+
+* A map whose class specifies its iteration order (`LinkedHashMap`) keeps
+  its **encounter order** and is flagged `collection_ordered=true`.
+* Any other map is emitted **sorted canonically by key text** (ties broken
+  by value text) and flagged `collection_ordered=false`, meaning "this
+  order was chosen for determinism and carries no meaning".
+* `Deque` and `List` iteration order **is** specified, so sequences are
+  always `ordered=true`.
+
+**Consequences.** Identical logical executions produce identical snapshots
+— asserted by test. `MapSnapshot.ordered` carries the distinction to the
+renderer, which prints *"order shown is canonical, not insertion order"*
+beneath an unordered map, so a viewer is never taught an insertion order
+that the JVM never promised. An ordered map carries no such note.
+
+Nothing is silently reinterpreted to look tidier: sorting is applied only
+where the order was already meaningless, and it is disclosed where it is
+applied.
+
+**Rejected:** reading `HashMap`'s internal table to recover bucket order
+(JDK-version fragile, needs reflection, and teaches an implementation
+detail rather than the algorithm); and rewriting user programs to use
+`LinkedHashMap` (that would change the program being taught).
+
+### ADR-6.5 A sequence's discipline is observed, not inferred
+
+**Status:** Accepted.
+
+**Context.** `SequenceSnapshot` must present a stack vertically (top first)
+and a queue horizontally (front first). The first implementation chose
+orientation from the last operation's end — and produced a real defect
+caught by looking at a rendered frame: a FIFO queue drained with `poll`
+was labelled **"top first"**, because `pop` (stack) and `poll` (queue)
+both act on the front. One operation cannot distinguish them.
+
+**Decision.** Derive the discipline from what actually differs: whether
+**insertions and removals share an end**. The reconstruction carries the
+observed `insert_end` and `remove_end` across the run;
+`discipline` is `lifo` when they match, `fifo` when they differ, and
+`unknown` until both an insertion and a removal have been seen.
+
+**Consequences.** An `ArrayDeque` used as a stack and the same class used
+as a queue render differently, and both labels are earned by observation —
+`balanced_parens` shows "stack (top first)", `task_queue` shows "queue
+(front first)", with no algorithm name consulted anywhere. Before either
+kind of operation has been observed the panel says only which end was
+touched, rather than asserting a discipline nothing has demonstrated.
+
+This is the same principle as ADR-6.1 applied one level down: state the
+thing you observed, not the thing you assume.
+
+### ADR-6.6 A mutation used as a value is still a mutation
+
+**Status:** Accepted.
+
+**Context.** Collection observation initially fired only on bare
+statement calls (`stack.push(c);`). Real code frequently mutates a
+collection *as an expression*: `int head = queue.poll();` and
+`total = total + stack.pop();`.
+
+**Evidence.** The first `task_queue` golden path rendered a queue that
+filled to `[1, 2, 3]` and **never drained**, because every `poll` was a
+declaration initializer. The video was not merely incomplete — it showed
+something untrue about the execution.
+
+**Decision.** Search the whole expression subtree of declarations and
+assignments for a mutating call on a tracked collection, and observe the
+collection after the statement.
+
+**Consequences.** The queue now shows its full FIFO lifecycle
+(`[1,2,3] → [2,3] → [3] → []`). Only direct calls on a simple name are
+matched; a chained or computed receiver is left untraced rather than
+guessed at, which yields fewer events but never a wrong one — the standing
+rule for this instrumenter.
+
+---
+
+## Phase 6.1 — Teaching-first visual layout
+
+### ADR-6.7 The scene frame is derived from the output aspect
+
+**Status:** Accepted.
+
+**Context.** The pipeline produced technically valid 1080x1920 videos that
+were unteachable: the Java code was too small to read on a phone and large
+black bands filled the top and bottom of every frame. The obvious remedy —
+raise font sizes — would have been wrong.
+
+**Measured cause.** A probe scene rendered at the real resolution reported
+`frame_width = 14.222`, `frame_height = 8.0`, `pixel_width = 1080`,
+`pixel_height = 1920`. Manim keeps `frame_width` at its **16:9** default
+even when `--resolution 1080,1920` is passed; only the pixel dimensions
+change. The scene was a 16:9 canvas rendered into a 9:16 image, so Manim
+letterboxed it: drawing the frame border showed it occupying roughly
+**31% of the frame height**, with ~69% structurally unreachable. Nothing
+was too small — most of the canvas was being discarded.
+
+**Decision.** The generated scene derives the frame from the real pixel
+aspect:
+
+```python
+config.frame_height = 8.0
+config.frame_width = config.frame_height * (config.pixel_width / config.pixel_height)
+```
+
+giving 4.5 x 8 units, 240 px per unit on **both** axes.
+
+**Consequences.** The whole image is addressable and pixels are square, so
+layout constants can be stated in units *and* in the pixels they actually
+produce — the claim "this is readable" becomes checkable rather than
+asserted. Every band constant in `primitives.py` was re-derived for the
+4.5-unit width; the previous `CODE_MAX_WIDTH = 6.8` was wider than the
+real frame. A regression test asserts the scene emits the correction and
+that the derived frame is square-pixelled.
+
+**Rejected:** raising font sizes (treats the symptom, and the letterbox
+would still waste 69% of the frame); scaling the whole scene up (Manim
+would clip at the letterbox boundary).
+
+### ADR-6.8 Fill the teaching surface; never solve layout by shrinking
+
+**Status:** Accepted.
+
+**Context.** The code panel was only ever *capped* (`if too wide, shrink`),
+so a short snippet stayed small and the code — the primary teaching
+content — was routinely the least readable element on screen. Captions had
+the same defect: a long narration was scaled to one line at roughly a
+tenth the height of the code.
+
+**Decision.** Elements fill their band rather than merely fitting inside
+it, and overflow is handled by restructuring, not by shrinking below a
+readability floor:
+
+* the code panel scales **to** the safe width, not merely under it;
+* captions **wrap** (46 chars/line, max 4 lines) at a fixed font size and
+  grow downward within a bounded band;
+* array cell glyphs are fitted **inside** their box, because font size
+  alone cannot guarantee that for multi-character values — the first
+  enlarged render showed letters overflowing into neighbouring cells;
+* variable-height map/sequence panels are top-aligned in a bounded band,
+  because anchoring them at a fixed centre let a three-entry map overrun
+  the caption;
+* the source window narrowed from 13 lines to 9, because 13 lines could
+  only fit by pushing text below the 0.20-unit (48 px) floor.
+
+**Consequences.** Fewer lines shown larger. The window change is
+presentational only: `SourceLocation.line` and the highlighted line are
+untouched, a test asserts a 9-line and a 13-line window highlight the same
+line, and the Phase 4.5.1 mapping regression still passes.
+
+Layout is enforced structurally: every band is asserted inside the safe
+area, bands are asserted ordered and separated, the code panel is asserted
+to fit its band, and an AST test forbids whole-scene scaling.
+
+**What is NOT claimed.** These tests check geometry, not legibility.
+Whether a human can read the result is settled by inspecting real frames,
+which stays mandatory — a contact sheet of the palindrome run is legible
+at 270x480 thumbnail scale, which is the actual evidence.

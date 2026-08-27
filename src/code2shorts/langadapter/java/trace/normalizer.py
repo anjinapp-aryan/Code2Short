@@ -35,6 +35,12 @@ def build_events(raw_events: list[dict]) -> list[TraceEvent]:
                 return_value=raw.get("return_value"),
                 iteration=raw.get("iteration"),
                 condition_result=raw.get("condition_result"),
+                collection_kind=raw.get("collection_kind"),
+                collection_operation=raw.get("collection_operation"),
+                collection_ordered=raw.get("collection_ordered"),
+                collection_size=raw.get("collection_size"),
+                collection_keys=raw.get("collection_keys"),
+                collection_values=raw.get("collection_values"),
                 description=raw.get("description", ""),
             )
         )

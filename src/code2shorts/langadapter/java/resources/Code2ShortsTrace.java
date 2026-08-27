@@ -224,6 +224,95 @@ public final class Code2ShortsTrace {
         emit(json);
     }
 
+    /**
+     * Phase 6: one observed collection state, after a mutating call.
+     *
+     * <p>Emits SEMANTIC contents only — entries for a Map, elements in
+     * iteration order for a Deque/List. JVM internals (buckets, table
+     * capacity, resize state, node chains) are deliberately never exposed:
+     * they are implementation details and teach nothing about the
+     * algorithm.
+     *
+     * <p>Determinism (ADR-6.4): `HashMap`'s iteration order is NOT
+     * guaranteed by the JLS, and ADR-005 rejects nondeterminism outright.
+     * So an insertion-ordered map (LinkedHashMap, which specifies its
+     * order) keeps its encounter order and is flagged ordered=true; any
+     * other Map is emitted in a canonical sort by key text and flagged
+     * ordered=false, meaning "this order is presentational, not
+     * semantic". Deque/List iteration order IS specified, so those are
+     * ordered=true.
+     */
+    public static void collection(String name, Object value, String operation, int line) {
+        checkEvents();
+        JsonWriter json = new JsonWriter();
+        json.field("event_type", "COLLECTION_MUTATION");
+        json.field("line_number", line);
+        json.field("call_depth", callDepth);
+        json.field("variable_name", name);
+        json.field("collection_operation", operation);
+
+        if (value instanceof java.util.Map) {
+            java.util.Map<?, ?> map = (java.util.Map<?, ?>) value;
+            boolean ordered = value instanceof java.util.LinkedHashMap;
+            java.util.List<String[]> entries = new java.util.ArrayList<>();
+            for (java.util.Map.Entry<?, ?> entry : map.entrySet()) {
+                entries.add(new String[] {repr(entry.getKey()), repr(entry.getValue())});
+            }
+            if (!ordered) {
+                entries.sort(
+                        (a, b) -> {
+                            int byKey = a[0].compareTo(b[0]);
+                            return byKey != 0 ? byKey : a[1].compareTo(b[1]);
+                        });
+            }
+            json.field("collection_kind", "map");
+            json.field("collection_ordered", ordered);
+            StringBuilder keys = new StringBuilder();
+            StringBuilder values = new StringBuilder();
+            for (String[] entry : entries) {
+                if (keys.length() > 0) {
+                    keys.append(UNIT);
+                    values.append(UNIT);
+                }
+                keys.append(entry[0]);
+                values.append(entry[1]);
+            }
+            json.field("collection_keys", keys.toString());
+            json.field("collection_values", values.toString());
+            json.field("collection_size", entries.size());
+            json.field("description", name + "." + operation + " -> size " + entries.size());
+        } else if (value instanceof java.util.Collection) {
+            java.util.Collection<?> items = (java.util.Collection<?>) value;
+            StringBuilder joined = new StringBuilder();
+            int size = 0;
+            for (Object item : items) {
+                if (size > 0) {
+                    joined.append(UNIT);
+                }
+                joined.append(repr(item));
+                size++;
+            }
+            json.field("collection_kind", "sequence");
+            json.field("collection_ordered", true);
+            json.field("collection_values", joined.toString());
+            json.field("collection_size", size);
+            json.field("description", name + "." + operation + " -> size " + size);
+        } else {
+            // Not a collection we can represent. Say so rather than
+            // degrading into a plausible-looking but unfounded visual.
+            json.field("collection_kind", "unsupported");
+            json.field("collection_ordered", false);
+            json.field("description", name + "." + operation + " -> unsupported collection");
+        }
+        emit(json);
+    }
+
+    /** Record separator between elements. U+001F is a control character
+     *  that cannot appear in Java source text, so an element containing
+     *  commas, quotes, brackets, newlines or "});"" cannot forge a
+     *  boundary. Each element is additionally JSON-escaped by JsonWriter. */
+    private static final String UNIT = "\u001F";
+
     /** Called from main's catch(Throwable) block. Not counted against
      *  MAX_EVENTS / not subject to checkEvents() — a program that hit its
      *  event limit must still be able to report the exception that limit

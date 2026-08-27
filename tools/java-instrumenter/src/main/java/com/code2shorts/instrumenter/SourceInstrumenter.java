@@ -8,6 +8,7 @@ import com.github.javaparser.ast.expr.AssignExpr;
 import com.github.javaparser.ast.expr.Expression;
 import com.github.javaparser.ast.expr.NameExpr;
 import com.github.javaparser.ast.expr.UnaryExpr;
+import com.github.javaparser.ast.expr.MethodCallExpr;
 import com.github.javaparser.ast.expr.VariableDeclarationExpr;
 import com.github.javaparser.ast.stmt.BlockStmt;
 import com.github.javaparser.ast.stmt.ExpressionStmt;
@@ -49,6 +50,39 @@ public final class SourceInstrumenter {
     // initializer.
     private final java.util.Set<String> uninitializedVars = new java.util.HashSet<>();
 
+    // Phase 6: local variables whose DECLARED type is a supported
+    // collection. Tracked per method, like uninitializedVars.
+    //
+    // A collection mutates through method CALLS (`seen.put(...)`,
+    // `stack.push(...)`), which the assignment/array-subscript emit points
+    // never see — so before Phase 6 a HashMap was observed exactly once,
+    // as `{}`, for an entire run. Recording the declared type here lets a
+    // mutating call re-observe the collection's semantic contents.
+    private final java.util.Set<String> collectionVars = new java.util.HashSet<>();
+
+    /** Declared types treated as observable collections. Interfaces are
+     *  included because that is how they are normally declared
+     *  (`Map<K,V> m = new HashMap<>()`). Concrete kind and ordering are
+     *  decided at RUNTIME by Code2ShortsTrace.collection(), not here —
+     *  the declared type cannot tell us whether the instance is ordered. */
+    private static final java.util.Set<String> COLLECTION_TYPES =
+            java.util.Set.of(
+                    "Map", "HashMap", "LinkedHashMap", "TreeMap", "SortedMap",
+                    "Deque", "ArrayDeque", "Queue", "Stack",
+                    "List", "ArrayList", "LinkedList",
+                    "Set", "HashSet", "LinkedHashSet", "TreeSet");
+
+    /** Calls that can change a collection's contents. `peek`/`get`/`size`
+     *  are deliberately absent: they observe without mutating, and emitting
+     *  a state event for them would add frames that teach nothing new. */
+    private static final java.util.Set<String> MUTATING_CALLS =
+            java.util.Set.of(
+                    "put", "putIfAbsent", "remove", "clear", "putAll",
+                    "push", "pop", "add", "addFirst", "addLast",
+                    "offer", "offerFirst", "offerLast",
+                    "poll", "pollFirst", "pollLast",
+                    "removeFirst", "removeLast", "addAll");
+
     public SourceInstrumenter(String className) {
         this.className = className;
     }
@@ -60,6 +94,7 @@ public final class SourceInstrumenter {
                 continue; // abstract/interface method — nothing to instrument
             }
             uninitializedVars.clear();
+        collectionVars.clear();
             if (isMainMethod(method)) {
                 instrumentMain(method);
             } else {
@@ -205,6 +240,11 @@ public final class SourceInstrumenter {
 
         java.util.Set<String> afterElse;
         if (ifStmt.getElseStmt().isPresent()) {
+            // NOTE: only `uninitializedVars` is branch-scoped. `collectionVars`
+            // must NOT be reset here — a collection declared before an
+            // if/else is still the same variable inside and after it, and
+            // clearing it here silently stopped every mutation inside a
+            // branch from being observed.
             uninitializedVars.clear();
             uninitializedVars.addAll(before);
             Statement elseStmt = ifStmt.getElseStmt().get();
@@ -313,6 +353,20 @@ public final class SourceInstrumenter {
                 }
                 Expression init = declarator.getInitializer().get();
                 String name = declarator.getNameAsString();
+                if (isCollectionType(declarator.getType())) {
+                    // Register it, and record its initial (usually empty)
+                    // state so the first frame shows a real observation
+                    // rather than an assumed empty collection.
+                    collectionVars.add(name);
+                    out.add(buildCollectionObservation(name, "init", line));
+                    continue;
+                }
+                // `int head = queue.poll();` — the declaration's VALUE
+                // mutated a collection, so observe it after the statement.
+                String consumed = mutatedCollectionName(init);
+                if (consumed != null) {
+                    out.add(buildCollectionObservation(consumed, mutatingCallName(init), line));
+                }
                 if (init.isArrayAccessExpr()) {
                     out.add(buildArrayRead(init.asArrayAccessExpr(), line));
                 } else {
@@ -329,6 +383,18 @@ public final class SourceInstrumenter {
         if (expr.isAssignExpr()) {
             AssignExpr assign = expr.asAssignExpr();
             Expression target = assign.getTarget();
+            // `total = total + stack.pop();` — the assigned VALUE mutated a
+            // collection. Recorded after the statement, like every other
+            // collection observation.
+            String consumedByValue = mutatedCollectionName(assign.getValue());
+            if (consumedByValue != null) {
+                Statement observation =
+                        buildCollectionObservation(
+                                consumedByValue, mutatingCallName(assign.getValue()), line);
+                out.add(stmt);
+                out.add(observation);
+                return;
+            }
             if (target.isArrayAccessExpr()) {
                 ArrayAccessExpr arrayTarget = target.asArrayAccessExpr();
                 if (assign.getValue().isArrayAccessExpr()) {
@@ -392,7 +458,69 @@ public final class SourceInstrumenter {
             }
         }
 
+        // Phase 6: a mutating call on a tracked collection. The statement
+        // runs first, then the collection is re-observed — so the emitted
+        // state is what the collection actually holds AFTER the operation.
+        String mutated = mutatedCollectionName(expr);
+        if (mutated != null) {
+            out.add(stmt);
+            out.add(buildCollectionObservation(mutated, mutatingCallName(expr), line));
+            return;
+        }
+
         out.add(stmt);
+    }
+
+    /** The first mutating call on a tracked collection anywhere inside this
+     *  expression, or null.
+     *
+     *  Searches the whole subtree rather than only the top-level expression,
+     *  because a mutation is very often a VALUE: `int head = queue.poll();`
+     *  and `total = total + stack.pop();` both change the collection while
+     *  the statement itself is a declaration or an assignment. Matching only
+     *  bare `queue.poll();` statements made a drained queue look as though
+     *  it only ever filled — a visibly wrong video, not merely a thinner one.
+     *
+     *  Only a direct call on a simple name counts; a chained or computed
+     *  receiver is left alone rather than guessed at. */
+    private MethodCallExpr mutatingCall(Expression expr) {
+        for (MethodCallExpr call : expr.findAll(MethodCallExpr.class)) {
+            if (call.getScope().isEmpty() || !call.getScope().get().isNameExpr()) {
+                continue;
+            }
+            String receiver = call.getScope().get().asNameExpr().getNameAsString();
+            if (collectionVars.contains(receiver)
+                    && MUTATING_CALLS.contains(call.getNameAsString())) {
+                return call;
+            }
+        }
+        return null;
+    }
+
+    private String mutatedCollectionName(Expression expr) {
+        MethodCallExpr call = mutatingCall(expr);
+        return call == null ? null : call.getScope().get().asNameExpr().getNameAsString();
+    }
+
+    private String mutatingCallName(Expression expr) {
+        return mutatingCall(expr).getNameAsString();
+    }
+
+    private static boolean isCollectionType(com.github.javaparser.ast.type.Type type) {
+        if (!type.isClassOrInterfaceType()) {
+            return false;
+        }
+        return COLLECTION_TYPES.contains(type.asClassOrInterfaceType().getNameAsString());
+    }
+
+    /** Emits the collection's semantic contents. The runtime helper decides
+     *  kind and ordering from the actual instance — the declared type
+     *  cannot tell us whether a Map is insertion-ordered. */
+    private Statement buildCollectionObservation(String name, String operation, int line) {
+        return StaticJavaParser.parseStatement(
+                String.format(
+                        "%s.collection(\"%s\", %s, \"%s\", %d);",
+                        TRACE, escape(name), name, escape(operation), line));
     }
 
     private Statement buildArrayRead(ArrayAccessExpr access, int line) {

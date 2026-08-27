@@ -15,6 +15,7 @@ from pathlib import Path
 
 from code2shorts.ai.contracts import (
     AIRequestMetadata,
+    EducationalPlanResponse,
     ExplanationResponse,
     NarrationResponse,
     VisualizationPlanResponse,
@@ -302,10 +303,223 @@ def _with_subject(result: ValidationResult, subject_artifact_id: str) -> Validat
 # code). See ARCHITECTURE_DECISIONS.md "Phase 4" for the full reasoning.
 # ---------------------------------------------------------------------------
 
+DEFAULT_EDUCATIONAL_PROMPT_VERSION = "v1"
+
+
+def build_educational_prompt(
+    trace: ExecutionTrace,
+    explanation: ExplanationResponse,
+    source_files: dict[str, str] | None = None,
+) -> str:
+    """Ask the model to plan a LESSON, not a video.
+
+    The contract is stated explicitly rather than implied — the Phase 5
+    bug was a prompt that assumed the model knew the response shape.
+    """
+    from code2shorts.ai.education import required_concepts
+
+    required = required_concepts(trace)
+
+    lines = [
+        f"You are an educational planner for the algorithm "
+        f"{trace.algorithm_name!r}, which was executed on input "
+        f"{trace.input!r} and produced output {trace.output!r}.",
+        "",
+        "YOUR ROLE",
+        "You decide what a learner needs to understand and in what order.",
+        "You are NOT the source of execution truth. The ExecutionTrace below",
+        "is authoritative and complete: it is what really happened inside a",
+        "JVM. Do not invent array values, pointer positions, loop counts,",
+        "branch results, variable values or final results.",
+        "",
+        "CLAIM KINDS - this distinction is mandatory",
+        "  observed    : asserts runtime state, e.g. 'fast = 3'.",
+        "                REQUIRES evidence_event_indices citing the real",
+        "                trace events that show it. Every value you state",
+        "                must appear in those events.",
+        "  explanation : explains WHY the algorithm does something. Grounded",
+        "                in the source and algorithm semantics, not in one",
+        "                event. Evidence is optional.",
+        "  commentary  : motivation, complexity, analogy. No evidence needed.",
+        "",
+        "Mark a moment 'observed' ONLY if you are citing what the trace shows.",
+        "If you want to explain why a pointer moves, that is 'explanation'.",
+        "",
+        "TEACH THESE CONCEPTS - all of them must appear as a moment's concept:",
+        "  " + ", ".join(concept.value for concept in required),
+        "",
+        "LENGTH",
+        "There is NO duration limit and no step budget. Do not drop a",
+        "conceptual transition to make the lesson shorter. A longer lesson",
+        "that teaches correctly is better than a short one that misleads.",
+        "Repetitive events may be summarised into one moment, but keep the",
+        "boundaries that teach: the first loop check teaches 'we continue",
+        "while...', the last teaches 'we stop because...'.",
+        "",
+        "ORDERING",
+        "prerequisite_ids must refer to moments that appear EARLIER.",
+        "",
+        f"Summary of the execution: {explanation.summary}",
+        "",
+        "EXECUTION TRACE (authoritative):",
+    ]
+    for event in trace.events:
+        variable = f" [{event.variable_name}]" if event.variable_name else ""
+        line = f" line {event.line_number}" if event.line_number else ""
+        lines.append(
+            f"  [{event.step_index}] {event.event_type}{variable}{line}: "
+            f"{event.description}"
+        )
+
+    if source_files:
+        lines.append("")
+        lines.append("SOURCE (for explaining WHY; line numbers are 1-based):")
+        for path, text in source_files.items():
+            lines.append(f"  --- {path} ---")
+            for number, code in enumerate(text.splitlines(), start=1):
+                lines.append(f"  {number:>3} | {code}")
+
+    return "\n".join(lines) + json_schema_instruction(EducationalPlanResponse)
+
+
+class EducationalPlanNode(WorkflowNode):
+    """Plans the LESSON between explanation and visualization.
+
+    Its output is validated twice, and both checks are about
+    understanding rather than length:
+
+      * `validate_educational_plan` - every execution-dependent claim is
+        supported by real trace evidence.
+      * `validate_learning_completeness` - the required concepts for this
+        algorithm's shape are actually taught.
+
+    Neither can fail a plan for being long. See ADR-5.11.
+    """
+
+    name = "educational_plan"
+
+    def __init__(
+        self,
+        provider: LLMProvider,
+        provider_name: str = "mock",
+        model: str = "mock",
+        prompt_version: str = DEFAULT_EDUCATIONAL_PROMPT_VERSION,
+        max_repair_attempts: int = 1,
+    ) -> None:
+        self._provider = provider
+        self._provider_name = provider_name
+        self._model = model
+        self._prompt_version = prompt_version
+        self._max_repair_attempts = max_repair_attempts
+
+    def run(self, state: Code2ShortsState, context: WorkflowContext) -> NodeResult:
+        from code2shorts.ai.education import validate_learning_completeness
+        from code2shorts.ai.grounding import validate_educational_plan
+
+        trace_artifact_id = state.artifact_ids.get("trace")
+        explanation_artifact_id = state.artifact_ids.get("explanation")
+        if trace_artifact_id is None or explanation_artifact_id is None:
+            raise NodeExecutionError(
+                FailureKind.PERMANENT,
+                "educational planning needs both trace and explanation artifacts",
+            )
+        trace = ExecutionTrace.model_validate(
+            context.artifact_store.get(trace_artifact_id).content
+        )
+        explanation = ExplanationResponse.model_validate(
+            context.artifact_store.get(explanation_artifact_id).content
+        )
+        source_files = dict(state.request.source_files)
+
+        metadata = AIRequestMetadata(
+            provider=self._provider_name,
+            model=self._model,
+            prompt_version=self._prompt_version,
+            input_artifact_ids=[trace_artifact_id, explanation_artifact_id],
+        )
+
+        def validate(parsed: EducationalPlanResponse) -> ValidationResult:
+            grounding = validate_educational_plan(parsed, trace, source_files)
+            completeness = validate_learning_completeness(parsed, trace)
+            errors = list(grounding.errors) + list(completeness.errors)
+            return ValidationResult(
+                stage="semantic",
+                passed=not errors,
+                errors=errors,
+                subject_artifact_id=trace_artifact_id,
+            )
+
+        self._emit_ai_event(context, WorkflowEventType.AI_CALL_STARTED)
+        try:
+            response, history = generate_with_repair(
+                self._provider,
+                build_prompt=lambda: build_educational_prompt(
+                    trace, explanation, source_files
+                ),
+                response_model=EducationalPlanResponse,
+                validate=validate,
+                max_repair_attempts=self._max_repair_attempts,
+            )
+        except SchemaValidationError as error:
+            state.validation.record(
+                _validation_result_from_error("schema", trace_artifact_id, str(error))
+            )
+            raise NodeExecutionError(
+                FailureKind.VALIDATION,
+                f"educational plan schema validation failed: {error}",
+            ) from error
+        except SemanticValidationError as error:
+            state.validation.record(
+                ValidationResult(
+                    stage="semantic",
+                    passed=False,
+                    errors=error.errors,
+                    subject_artifact_id=trace_artifact_id,
+                )
+            )
+            raise NodeExecutionError(
+                FailureKind.VALIDATION,
+                "educational plan failed grounding/completeness validation "
+                "after repair attempts",
+                detail={"errors": error.errors},
+            ) from error
+        finally:
+            self._emit_ai_event(context, WorkflowEventType.AI_CALL_COMPLETED)
+
+        state.validation.record_history(history)
+
+        artifact = Artifact.create(
+            type=ArtifactType.EDUCATIONAL_PLAN,
+            producer=f"{self._provider_name}:{self._model}",
+            content=response.model_dump(),
+            input_artifact_ids=[trace_artifact_id, explanation_artifact_id],
+            metadata=metadata.model_dump(),
+        )
+        context.artifact_store.save(artifact)
+        state.artifact_ids["educational_plan"] = artifact.id
+
+        return NodeResult(state=state, artifact_ids_created=[artifact.id])
+
+    def _emit_ai_event(self, context: WorkflowContext, event_type: WorkflowEventType) -> None:
+        context.emit(
+            WorkflowEvent(
+                type=event_type,
+                workflow_id=context.workflow_id,
+                execution_id=context.execution_id,
+                node_name=self.name,
+                data={"provider": self._provider_name, "model": self._model},
+            )
+        )
+
+
 DEFAULT_VISUALIZATION_PROMPT_VERSION = "v2"
 
 
-def build_visualization_prompt(trace: ExecutionTrace, explanation: ExplanationResponse) -> str:
+def build_visualization_prompt(
+    trace: ExecutionTrace,
+    explanation: ExplanationResponse,
+    education: EducationalPlanResponse | None = None,
+) -> str:
     from code2shorts.ai.contracts import VisualAction
 
     lines = [
@@ -319,6 +533,25 @@ def build_visualization_prompt(trace: ExecutionTrace, explanation: ExplanationRe
     ]
     for event in trace.events:
         lines.append(f"  [{event.step_index}] {event.event_type}: {event.description}")
+
+    if education is not None:
+        # The lesson decides WHAT matters; this prompt only decides how to
+        # show it. Every moment must survive into the visuals — dropping one
+        # to shorten the video is prohibited (ADR-5.11).
+        lines.append("")
+        lines.append(
+            "EDUCATIONAL PLAN — each moment below must be visible in the "
+            "output. Do not omit one to shorten the video; there is no "
+            "duration limit."
+        )
+        for moment in education.moments:
+            evidence = ", ".join(str(i) for i in moment.evidence_event_indices)
+            lines.append(
+                f"  ({moment.id}) {moment.concept.value} "
+                f"[{moment.claim_kind.value}] events[{evidence}]: "
+                f"{moment.explanation}"
+            )
+
     return "\n".join(lines) + json_schema_instruction(VisualizationPlanResponse)
 
 
@@ -361,11 +594,25 @@ class VisualizationPlanNode(WorkflowNode):
         trace = ExecutionTrace.model_validate(trace_artifact.content)
         explanation = ExplanationResponse.model_validate(explanation_artifact.content)
 
+        # Optional so every existing caller and test keeps working: when
+        # EducationalPlanNode has run, its lesson steers the visuals; when
+        # it has not, this behaves exactly as it did in Phase 5.
+        education = None
+        education_artifact_id = state.artifact_ids.get("educational_plan")
+        if education_artifact_id is not None:
+            education_artifact = context.artifact_store.get(education_artifact_id)
+            if education_artifact is not None:
+                education = EducationalPlanResponse.model_validate(
+                    education_artifact.content
+                )
+
         self._emit_event(context, WorkflowEventType.AI_CALL_STARTED)
         try:
             plan, history = generate_with_repair(
                 self._provider,
-                build_prompt=lambda: build_visualization_prompt(trace, explanation),
+                build_prompt=lambda: build_visualization_prompt(
+                    trace, explanation, education
+                ),
                 response_model=VisualizationPlanResponse,
                 validate=lambda parsed: _with_subject(
                     validate_visualization_plan(parsed, trace), trace_artifact_id

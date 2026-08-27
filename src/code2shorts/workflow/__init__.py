@@ -6,6 +6,7 @@ from code2shorts.workflow.node import NodeResult, WorkflowNode
 from code2shorts.workflow.nodes import (
     CompileNode,
     ComposeMediaNode,
+    EducationalPlanNode,
     ExplainNode,
     FinalValidationNode,
     NarrationNode,
@@ -31,6 +32,7 @@ __all__ = [
     "Code2ShortsState",
     "CompileNode",
     "ComposeMediaNode",
+    "EducationalPlanNode",
     "ExplainNode",
     "FailureKind",
     "FinalValidationNode",

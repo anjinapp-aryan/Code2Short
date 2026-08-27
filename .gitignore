@@ -10,9 +10,12 @@ dist/
 htmlcov/
 # Every local env variant, not just `.env` - `.env.local` held real keys
 # and matched nothing here, so one `git add -A` would have published them.
+# The `!` re-includes the two committed TEMPLATES, which carry
+# placeholders only and are the configuration contract.
 .env
 .env.*
 !.env.example
+!.env.production.example
 # Anchored to repo root ONLY — Manim's own generated output dirs, not
 # src/code2shorts/media/ (a real Phase 4 source package that otherwise
 # collides with this pattern; git's default media/ matches any depth).

@@ -13,7 +13,7 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator
 
 
-TRACE_SCHEMA_VERSION = 2
+TRACE_SCHEMA_VERSION = 3
 """Bumped when the MEANING or FORMAT of trace fields changes.
 
 1 -> Phase 2/4.1: array values rendered via String.valueOf (int[] came out
@@ -21,6 +21,9 @@ TRACE_SCHEMA_VERSION = 2
 2 -> Phase 4.2: array values rendered via Code2ShortsTrace.repr, so arrays
      carry real contents ("[2, 7, 11, 15]"); Phase 4.3 adds provenance
      fields alongside.
+3 -> Phase 6: COLLECTION_MUTATION events carry observed Map/Deque/List
+     contents. Purely additive — a version-2 trace omits the new fields
+     and still validates, and nothing that read version 2 changes meaning.
 """
 
 
@@ -56,6 +59,7 @@ class TraceEventType(StrEnum):
     LOOP_ITERATION = "LOOP_ITERATION"
     ARRAY_READ = "ARRAY_READ"
     ARRAY_WRITE = "ARRAY_WRITE"
+    COLLECTION_MUTATION = "COLLECTION_MUTATION"
     EXCEPTION_THROWN = "EXCEPTION_THROWN"
 
 
@@ -186,6 +190,28 @@ class TraceEvent(BaseModel):
     return_value: str | None = None
     iteration: int | None = None
     condition_result: bool | None = None
+
+    # Phase 6 collection observation. All optional and additive: a
+    # pre-Phase-6 trace omits them entirely and still validates.
+    #
+    # Contents are SEMANTIC only - entries for a map, elements in
+    # iteration order for a sequence. JVM internals (buckets, table
+    # capacity, resize state, node chains) are deliberately never
+    # captured: they are implementation details that teach nothing
+    # about the algorithm, and reading them would need reflection.
+    collection_kind: str | None = None
+    """'map' | 'sequence' | 'unsupported'."""
+    collection_operation: str | None = None
+    collection_ordered: bool | None = None
+    """True when the observed order is SEMANTIC (LinkedHashMap,
+    Deque/List). False means the order is a canonical sort chosen for
+    determinism and carries no meaning - see ADR-6.4."""
+    collection_size: int | None = None
+    collection_keys: str | None = None
+    collection_values: str | None = None
+    """Unit-separated (U+001F) element text. A separator that cannot
+    occur in Java source, so an element containing commas, quotes,
+    brackets or newlines cannot forge a boundary."""
 
 
 class ExecutionTrace(BaseModel):

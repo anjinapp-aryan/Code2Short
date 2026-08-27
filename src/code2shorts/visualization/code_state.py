@@ -21,9 +21,19 @@ from pydantic import BaseModel, Field
 
 from code2shorts.core.models import ExecutionTrace, SourceLocation, TraceEventType
 
-DEFAULT_WINDOW_RADIUS = 6
-"""Lines shown above and below the executing line. A 13-line window is
-about what stays readable at 1080x1920 inside the code band."""
+DEFAULT_WINDOW_RADIUS = 4
+"""Lines shown above and below the executing line, so 9 lines at most.
+
+Phase 6.1 lowered this from 6 (a 13-line window). The code band is 2.30
+units tall and the readability floor is 0.20 units (48 px) per line, so a
+13-line window plus its chrome could only fit by scaling the text below
+that floor. Showing fewer lines LARGER teaches better than showing more
+lines that nobody can read — and the window still spans the whole
+construct in every supported fixture (a loop body plus its condition).
+
+This is a presentation choice only: `SourceLocation.line` and the
+highlighted line are unaffected, so the Phase 4.5.1 mapping invariant
+holds regardless of how many lines are visible."""
 
 
 class CodeState(BaseModel):

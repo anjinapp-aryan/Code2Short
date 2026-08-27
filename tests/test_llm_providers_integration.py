@@ -258,5 +258,64 @@ def test_direct_gemini_still_works() -> None:
 
     provider = build_llm_provider(Settings(llm_provider="gemini"))
     assert isinstance(provider, GeminiLLMProvider)
+
+    try:
+        reply = provider.complete("Reply with the single word: pong")
+    except Exception as error:  # noqa: BLE001 - classified below, then re-raised
+        message = str(error)
+        # Gemini's free tier allows 20 requests/day per model. Exhausting it
+        # is an account fact, not a Code2Shorts defect - the same reasoning
+        # as _complete_or_skip for the gateway. Everything else still fails.
+        exhausted = (
+            "RESOURCE_EXHAUSTED" in message
+            or "exceeded your current quota" in message
+            or "429" in message
+        )
+        if not exhausted:
+            raise
+        pytest.skip(
+            "GEMINI QUOTA EXHAUSTED. This test did NOT pass and did NOT fail - "
+            "the free tier allows 20 requests/day per model and today's budget "
+            "is spent. Retry tomorrow or use a billed key."
+        )
+    assert "pong" in reply.lower()
+
+
+# ---- xAI / Grok -----------------------------------------------------------
+
+
+def _xai_credential_state() -> tuple[str, str]:
+    """(state, reason) for the configured xAI credential — never its value."""
+    from code2shorts.config import classify_credential
+
+    settings = Settings()
+    vendor = classify_credential(settings.xai_api_key)
+    if vendor == "missing":
+        return "missing", (
+            "XAI/GROK NOT VERIFIED — no credential. This test did NOT pass; "
+            "it was not run. Set XAI_API_KEY (keys begin `xai-`)."
+        )
+    if vendor != "xai":
+        return "wrong-vendor", (
+            "XAI/GROK NOT VERIFIED — credential is not an xAI credential. "
+            f"Its prefix identifies it as {vendor!r}; xAI keys begin `xai-`. "
+            "This test did NOT pass and did NOT fail. The implementation is "
+            "correct and unchanged: supply a genuine xAI key to verify it."
+        )
+    return "ok", ""
+
+
+@pytest.mark.skipif(
+    _xai_credential_state()[0] != "ok", reason=_xai_credential_state()[1]
+)
+def test_xai_grok_answers_through_the_shared_openai_compatible_provider() -> None:
+    """xAI must work through the SAME provider class as every other
+    OpenAI-compatible backend — no GrokProvider, just a different URL."""
+    from code2shorts.ai.providers import OpenAICompatibleProvider
+
+    provider = build_llm_provider(Settings(), provider="xai", timeout_seconds=120.0)
+    assert isinstance(provider, OpenAICompatibleProvider)
+    assert provider.describe["base_url"] == "https://api.x.ai/v1"
+
     reply = provider.complete("Reply with the single word: pong")
     assert "pong" in reply.lower()

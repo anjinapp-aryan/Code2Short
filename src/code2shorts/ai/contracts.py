@@ -75,6 +75,10 @@ class VisualAction(StrEnum):
     METHOD_CALL = "method_call"
     RETURN_VALUE = "return_value"
     ARRAY_ACCESS = "array_access"
+    DATA_STRUCTURE_UPDATE = "data_structure_update"
+    """Phase 6: an observed Map/Deque/List mutation. A vocabulary word
+    for a KIND OF STATE, not for an algorithm — the same action covers
+    a map put, a stack push and a queue poll."""
     HIGHLIGHT = "highlight"
     COMPARE = "compare"
     SWAP = "swap"
@@ -131,3 +135,107 @@ class NarrationSegment(BaseModel):
 
 class NarrationResponse(BaseModel):
     segments: list[NarrationSegment]
+
+
+# ---- Educational planning (Phase 5.3) -------------------------------------
+
+
+class LearningConcept(StrEnum):
+    """The CLOSED vocabulary of educational moments.
+
+    Closed for the same reason `VisualAction` is: an out-of-vocabulary
+    category fails Pydantic validation before any project code inspects
+    it, so the LLM cannot invent a concept type that later branches into
+    unexpected behaviour.
+
+    These are *conceptual* moments, not animation frames. One moment may
+    cite many execution events; many repetitive events may collapse into
+    one moment. Neither is a licence to drop a conceptual transition.
+    """
+
+    INTRODUCTION = "introduction"
+    INITIALIZATION = "initialization"
+    DATA_STRUCTURE = "data_structure"
+    CORE_CONCEPT = "core_concept"
+    STATE_TRANSITION = "state_transition"
+    DECISION = "decision"
+    POINTER_MOVEMENT = "pointer_movement"
+    DATA_MOVEMENT = "data_movement"
+    LOOP_BEHAVIOUR = "loop_behaviour"
+    INVARIANT = "invariant"
+    TERMINATION = "termination"
+    RESULT = "result"
+    COMPLEXITY = "complexity"
+
+
+class ClaimKind(StrEnum):
+    """What KIND of statement a moment is making.
+
+    This distinction is the point of Phase 5.3. `OBSERVED` claims assert
+    something that happened at runtime ("fast = 3") and are only
+    believable if a real trace event says so. `EXPLANATION` and
+    `COMMENTARY` reason about the algorithm and are not checked against
+    the trace, because there is no trace event for "why".
+
+    Conflating them is how a plausible-sounding hallucinated value gets
+    presented to a learner as fact.
+    """
+
+    OBSERVED = "observed"
+    """Asserts runtime state. REQUIRES trace evidence."""
+
+    EXPLANATION = "explanation"
+    """Explains why the algorithm does something. Grounded in the source
+    and algorithm semantics, not in a single event."""
+
+    COMMENTARY = "commentary"
+    """Pedagogical framing — motivation, complexity, analogy."""
+
+
+class EducationalMoment(BaseModel):
+    """One thing the learner needs to understand."""
+
+    id: str = Field(description="stable identifier, e.g. 'm3'")
+    concept: LearningConcept
+    claim_kind: ClaimKind
+    explanation: str = Field(description="what the learner should understand")
+    evidence_event_indices: list[int] = Field(
+        default_factory=list,
+        description=(
+            "TraceEvent.step_index values supporting this moment. MUST be "
+            "non-empty when claim_kind is 'observed' — validated against "
+            "the real ExecutionTrace, never trusted."
+        ),
+    )
+    source_lines: list[int] = Field(
+        default_factory=list, description="1-based Java source lines this moment concerns"
+    )
+    narration: str = Field(description="what is spoken for this moment")
+    importance: int = Field(
+        default=3, ge=1, le=5, description="5 = essential; 1 = optional colour"
+    )
+    prerequisite_ids: list[str] = Field(
+        default_factory=list, description="moment ids that must come earlier"
+    )
+
+
+class EducationalPlanRequest(BaseModel):
+    trace_artifact_id: str
+    explanation_artifact_id: str
+    metadata: AIRequestMetadata
+
+
+class EducationalPlanResponse(BaseModel):
+    """A pedagogically ordered account of one real execution.
+
+    Deliberately has NO duration field. Duration is a presentation
+    concern, computed downstream from real measured speech — see
+    ADR-5.11 "Educational Integrity Over Duration". Nothing here may be
+    dropped to hit a runtime target.
+    """
+
+    lesson_title: str
+    problem_statement: str = Field(description="what problem the algorithm solves")
+    moments: list[EducationalMoment]
+    time_complexity: str | None = None
+    space_complexity: str | None = None

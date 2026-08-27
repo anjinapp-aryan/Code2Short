@@ -373,6 +373,95 @@ the response itself. Every attack is stopped by a validator, not by luck.
   providers. Their handling of prompt data is outside this project's
   control and is not audited here.
 
+## Configuration and secrets — local vs production
+
+Phase 5 proved the *provider* boundary. This section covers the boundary
+around the credential itself, added after a real key leaked into test
+output on this machine.
+
+### The environment switch
+
+`CODE2SHORTS_ENV` decides which dotenv files may be read, and nothing else:
+
+| Value | Files read |
+|---|---|
+| `local` (default) | `.env`, then `.env.local` |
+| `test` / `ci` | none |
+| `production` / `prod` | none |
+
+Production reads **no dotenv file**. dotenv paths resolve against the
+working directory, so a production process launched inside a developer
+checkout would otherwise silently inherit `.env.local` and run on a
+personal key. This is a structural fix, not a documented rule: there is no
+file for it to find.
+
+Verified by clean-environment subprocess dry run, executed *from inside the
+repository while `.env.local` was present on disk*: the process reported
+`dotenv files read: (none)` and every credential `MISSING`.
+
+### Precedence
+
+    process environment  >  env files  >  field defaults
+
+In production only the first and last apply.
+
+### Two real leaks, both fixed
+
+1. **`.env.local` was not gitignored.** `.gitignore` covered `.env` only.
+   A real `.env.local` existed with live keys; one `git add -A` would have
+   published them to a public repository. Now `.env` + `.env.*`, with the
+   two committed templates explicitly re-included.
+2. **A real key was printed into pytest output.** A test asserted
+   `Settings().gemini_api_key is None` — conflating "the class ships a
+   default" with "this machine has no key" — and pytest renders the
+   compared value in its diff. Two fixes: the test now inspects the field
+   definition, and credential fields are `SecretStr`, so `repr`, `str`,
+   `model_dump`, `model_dump_json` and tracebacks all render a mask.
+   `config.reveal()` unwraps only at the three provider-factory call sites
+   where the value goes on the wire.
+
+### The unit suite was loading real credentials
+
+pytest runs with the repository as its working directory, so `Settings()`
+read `.env.local` — meaning results depended on which machine ran them,
+and any test building a provider could have made a live billed call by
+accident. `tests/conftest.py` now sets `CODE2SHORTS_ENV=test` and strips
+credential variables for every non-`integration` test. Integration tests
+are deliberately untouched: reaching a real provider is their purpose.
+
+### Startup validation
+
+`validate_configuration()` fails before Maven, the JVM, Manim or FFmpeg do
+any work. Messages name the **variable**, never the value, so they are safe
+to log:
+
+    GEMINI_API_KEY is required when LLM_PROVIDER=gemini
+
+`scripts/production_config_check.py` runs it as a deployment preflight.
+
+### What is asserted by test
+
+A canary credential must not appear in: `Settings` repr/str/`model_dump`/
+`model_dump_json`, provider provenance (`describe`, which is stored on
+artifacts), artifacts, workflow state, or exception messages. Prompt
+builders are AST-checked to be unable to reach `os.environ` or any
+`*_api_key` attribute, so a credential cannot travel to a third-party
+gateway inside a prompt. No module may pass an `*_api_key` attribute to
+`logger`, `logging` or `print`. Both committed templates are scanned for
+real key shapes (`AIza…`, `sk-…`, `gsk_…`, `xai-…`) and every `*_API_KEY`
+line in them must be empty or a `<PLACEHOLDER>`.
+
+### What this does NOT protect against
+
+* **A key already committed in history.** These controls stop new leaks;
+  they cannot un-publish an old one. Rotation is the only remedy, and it is
+  a human decision — nothing here rotates or revokes automatically.
+* **A developer exporting a key into their shell.** Process environment
+  beats everything by design, including in `test`. The conftest strips the
+  names it knows; an unusual one would survive.
+* **Prompt content reaching the configured provider.** No credential can be
+  included, but the algorithm source and its trace are sent.
+
 ## What Phase 1 does NOT protect against
 
 This is a development-grade boundary, not a production-grade security

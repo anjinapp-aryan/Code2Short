@@ -21,7 +21,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from code2shorts.ai.contracts import NarrationResponse, VisualizationPlanResponse
-from code2shorts.core.models import ValidationResult
+from code2shorts.core.models import ExecutionTrace, ValidationResult
 
 
 class AlignedSegment(BaseModel):
@@ -163,5 +163,93 @@ def validate_alignment(
                 f"({segment.audio_duration_seconds:.2f}s) exceeds its visual step "
                 f"({segment.duration_seconds:.2f}s)"
             )
+
+    return ValidationResult(stage="domain", passed=not errors, errors=errors)
+
+
+def validate_teaching_synchronization(
+    result: AlignmentResult,
+    plan: VisualizationPlanResponse,
+    trace: "ExecutionTrace | None" = None,
+    tolerance_seconds: float = 0.05,
+) -> ValidationResult:
+    """Semantic synchronization, not merely technical.
+
+    `validate_timeline` and FFmpeg both prove that total audio and total
+    video have the same length. That is necessary and nowhere near
+    sufficient: a track can match in total while every individual sentence
+    describes a state the learner is no longer looking at.
+
+    This checks the relationship the learner actually experiences — that
+    while segment N is being spoken, the visuals showing the state segment
+    N describes are the ones on screen:
+
+      * a segment's spoken window equals its own step's visual window,
+      * that step exists, and cites a real trace event,
+      * a segment never spans a step boundary (narration continuing over a
+        state change is exactly the "explains one thing while showing
+        another" failure),
+      * segments advance in the same order as the steps they narrate,
+      * every segment carries MEASURED audio, so timing is never based on
+        a character-count estimate.
+    """
+    errors: list[str] = []
+    steps = {step.order: step for step in plan.steps}
+
+    # The visual timeline, computed the same way align_narration does.
+    windows: dict[int, tuple[float, float]] = {}
+    cursor = 0.0
+    for step in sorted(plan.steps, key=lambda s: s.order):
+        windows[step.order] = (cursor, cursor + float(step.duration_seconds))
+        cursor += float(step.duration_seconds)
+
+    real_events = {event.step_index for event in trace.events} if trace else None
+
+    previous_step_order: int | None = None
+    for segment in sorted(result.segments, key=lambda s: s.segment_id):
+        where = f"segment {segment.segment_id}"
+        order = segment.visualization_step_order
+
+        step = steps.get(order)
+        if step is None:
+            errors.append(f"{where}: narrates step {order}, which is not in the plan")
+            continue
+
+        if real_events is not None and step.trace_event_index not in real_events:
+            errors.append(
+                f"{where}: its step cites trace event {step.trace_event_index}, "
+                "which does not exist"
+            )
+
+        start, end = windows[order]
+        if abs(segment.start_seconds - start) > tolerance_seconds:
+            errors.append(
+                f"{where}: speech starts at {segment.start_seconds:.2f}s but its "
+                f"visual moment starts at {start:.2f}s"
+            )
+        if abs(segment.end_seconds - end) > tolerance_seconds:
+            errors.append(
+                f"{where}: speech ends at {segment.end_seconds:.2f}s but its "
+                f"visual moment ends at {end:.2f}s"
+            )
+
+        # Narration must not run past the state it describes.
+        if segment.audio_duration_seconds is None:
+            errors.append(
+                f"{where}: no measured audio duration — timing would rest on an "
+                "estimate rather than the real speech"
+            )
+        elif segment.start_seconds + segment.audio_duration_seconds > end + tolerance_seconds:
+            errors.append(
+                f"{where}: speech runs {segment.audio_duration_seconds:.2f}s past "
+                "the visual state it describes"
+            )
+
+        if previous_step_order is not None and order < previous_step_order:
+            errors.append(
+                f"{where}: narrates step {order} after step {previous_step_order} — "
+                "the learner hears the steps out of order"
+            )
+        previous_step_order = order
 
     return ValidationResult(stage="domain", passed=not errors, errors=errors)

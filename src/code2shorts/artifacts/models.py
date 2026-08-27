@@ -21,6 +21,9 @@ class ArtifactType(StrEnum):
     COMPILATION = "compilation"
     TRACE = "trace"
     EXPLANATION = "explanation"
+    EDUCATIONAL_PLAN = "educational_plan"
+    """Phase 5.3: the pedagogical plan — what the learner must
+    understand — between explanation and visualization."""
     VISUALIZATION_PLAN = "visualization_plan"
     ANIMATION = "animation"
     NARRATION = "narration"

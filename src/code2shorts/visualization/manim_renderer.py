@@ -33,7 +33,9 @@ from code2shorts.visualization.primitives import (
     array_row,
     caption_text,
     code_panel,
+    map_panel,
     pointer_arrows,
+    sequence_panel,
     scalar_panel,
     title_text,
 )
@@ -100,7 +102,22 @@ def build_scene_source(
         step_body: list[str] = []
         groups: list[str] = []
 
-        if frame is not None and frame.primary_array is not None:
+        # Dispatch on WHAT STATE IS PRESENT, never on the algorithm. A
+        # frame that observed a collection renders that collection; a frame
+        # with an array renders tiles and pointers. Binary search needs no
+        # special case here — its low/mid/high are ordinary scalars that
+        # index an array, so the existing pointer rule already draws them.
+        if frame is not None and frame.primary_map is not None:
+            step_body += map_panel(frame, var="map_group")
+            step_body += scalar_panel(frame, var="vars_group")
+            groups = ["map_group", "vars_group"]
+
+        elif frame is not None and frame.primary_sequence is not None:
+            step_body += sequence_panel(frame, var="seq_group")
+            step_body += scalar_panel(frame, var="vars_group")
+            groups = ["seq_group", "vars_group"]
+
+        elif frame is not None and frame.primary_array is not None:
             step_body += array_row(frame, var="arr_group")
             step_body += pointer_arrows(frame, array_var="arr_group", var="ptr_group")
             step_body += scalar_panel(frame, var="vars_group")
@@ -140,6 +157,22 @@ def build_scene_source(
     return "\n".join(
         [
             "from manim import *",
+            "",
+            # Phase 6.1 root-cause fix. Manim keeps `frame_width` at its
+            # 16:9 default (14.22 units) even when rendered at 1080x1920,
+            # so the scene's coordinate system was 16:9 while the output
+            # was 9:16 — Manim letterboxed the whole scene into a band
+            # occupying only ~31% of the frame height (measured), and the
+            # remaining 69% was structurally unreachable black. Content was
+            # never "too small"; the canvas was being thrown away.
+            #
+            # Deriving frame_width from the real pixel aspect makes the
+            # full 1080x1920 addressable and square (240 px per unit on
+            # both axes), which is what the layout constants in
+            # primitives.py now assume.
+            "config.frame_height = 8.0",
+            "config.frame_width = config.frame_height * "
+            "(config.pixel_width / config.pixel_height)",
             "",
             f"class {class_name}(Scene):",
             "    def construct(self):",

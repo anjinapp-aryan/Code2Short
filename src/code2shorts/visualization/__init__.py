@@ -14,6 +14,8 @@ from code2shorts.visualization.renderer import (
 )
 from code2shorts.visualization.state import (
     ArraySnapshot,
+    SequenceSnapshot,
+    MapSnapshot,
     FrameState,
     Pointer,
     parse_array_value,
@@ -25,6 +27,8 @@ from code2shorts.visualization.validation import validate_visualization_plan
 __all__ = [
     "DEFAULT_WINDOW_RADIUS",
     "ArraySnapshot",
+    "SequenceSnapshot",
+    "MapSnapshot",
     "CodeState",
     "build_code_state",
     "resolve_source_locations",

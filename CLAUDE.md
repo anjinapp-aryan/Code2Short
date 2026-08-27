@@ -131,6 +131,18 @@ generated code that runs in temp workspaces.
 - Security-property tests parse the AST rather than grepping source text —
   modules legitimately document the constructs they forbid, and text search
   flags its own comments.
+- **Every changed line traces to the request.** Don't reformat, rename, or
+  "improve" adjacent code, and match surrounding style even where you'd
+  differ. Mechanical repo-wide edits are the specific hazard here: a
+  Phase 6 `collectionVars.clear()` was inserted at every
+  `uninitializedVars.clear()` site, including two inside `instrumentIf`,
+  which silently stopped every collection mutation inside a branch from
+  being observed. Scope such edits by hand and re-verify.
+- **A bug fix starts with a failing test when practical.** Reproduce first,
+  then fix. If reliable reproduction is impossible, document why and add
+  the strongest feasible regression or characterization test. The SRT
+  cue-injection and Phase 4.5.1 line-mapping defects were both closed this
+  way, and it is why they stay closed.
 
 ## Current state
 
@@ -165,6 +177,26 @@ imports it and `pyproject.toml` is unchanged (ADR-5.2).
 11. **A superseded repair attempt is not a failed run.** Keep the full
     history as audit evidence; `ValidationResult.superseded` marks replaced
     attempts and `all_passed` ignores them.
+
+12. **Configuration is environment-switched.** `CODE2SHORTS_ENV`
+    controls which dotenv files load: `local` reads `.env`/`.env.local`,
+    `test` and `production` read none. Production must never be able to
+    find `.env.local`. Credentials are `SecretStr`; unwrap only with
+    `config.reveal()` at the wire. `tests/conftest.py` forces
+    `CODE2SHORTS_ENV=test`, because the unit suite was otherwise loading a
+    developer's real keys.
+
+13. **Educational integrity beats duration (ADR-5.11).** Never add a
+    `MAX_STEPS`/`MAX_VIDEO_SECONDS` cap, and never drop a conceptual
+    transition to shorten a video. `ai/education.py` and `ai/grounding.py`
+    are AST-tested to contain no budget. `EducationalPlanResponse` has no
+    duration field on purpose. Redundant events may be *summarised* into
+    one moment, but conceptual boundaries (first loop check vs last)
+    survive.
+14. **`ClaimKind` splits truth from reasoning.** `observed` asserts runtime
+    state and requires trace evidence whose values are checked;
+    `explanation`/`commentary` reason freely. Requiring evidence for "why"
+    would force the model to fabricate it.
 
 Free-tier routing is slow (LLM stage 277–486 s vs ~135 s for Manim), so the
 Phase 5 golden path takes `--timeout` and defaults to 180 s rather than

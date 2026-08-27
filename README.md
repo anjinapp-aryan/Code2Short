@@ -177,6 +177,77 @@ target audience Java developers. Once code generation + rendering are
 wired up end to end, the same visual primitives must be reused (not
 rebuilt) for Palindrome, then Two Sum.
 
+## Educational integrity over duration
+
+Code2Shorts is not a "compress everything into 60 seconds" system. It
+prioritizes execution correctness, learner comprehension and visual
+clarity over duration targets, and **must not remove an execution state,
+explanation or conceptual transition solely to satisfy a duration
+constraint** (ADR-5.11).
+
+Phase 5.3 added an educational planning layer between the trace and the
+visuals:
+
+```
+ExecutionTrace  ->  EducationalPlan  ->  VisualizationPlan
+ (what is TRUE)     (what MATTERS)        (how to SHOW it)
+```
+
+`EducationalPlanResponse` has no duration field — there is nothing to
+optimise against. A plan is judged on concept coverage: every moment is
+labelled `observed` / `explanation` / `commentary`, and an `observed`
+claim must cite real trace events whose values are checked against the
+reconstructed state. Required concepts are derived from the trace's
+*shape* (pointer traversal, array mutation, scalar computation), never
+from the algorithm's name.
+
+The gate question is "does this teach the algorithm clearly and
+correctly?" — a correct three-minute video passes; a misleading
+forty-five-second one fails. See
+[docs/PHASE_5_3_REUSE_AUDIT.md](docs/PHASE_5_3_REUSE_AUDIT.md).
+
+## Data structures (Phase 6, planned)
+
+A focused audit ([docs/PHASE_6A_REUSE_AUDIT.md](docs/PHASE_6A_REUSE_AUDIT.md))
+found that the blocker for HashMap/Stack/Queue is **instrumentation, not
+visualization**. Running the current tracer on real Java shows a `HashMap`
+captured once as `{}` and an `ArrayDeque` once as `[]` — every `put`,
+`push` and `pop` is a method call, and the instrumenter emits events only
+on assignments and array subscripts. Binary search, by contrast, is
+already fully observable and needs nothing new.
+
+Every candidate library that can draw a HashMap is driven by author-issued
+visualization commands, which would invert this project's guarantee that a
+frame is true *because the JVM did it*. All were rejected as dependencies;
+three are reference-only. Zero dependencies added (ADR-6.1 – ADR-6.3).
+
+## Configuration
+
+`CODE2SHORTS_ENV` decides which files are read, and nothing else:
+
+| Value | Files read | For |
+|---|---|---|
+| `local` (default) | `.env`, then `.env.local` | your machine |
+| `test` / `ci` | none | deterministic pytest |
+| `production` / `prod` | none | runtime injection only |
+
+Production reads **no dotenv file** — dotenv paths resolve against the
+working directory, so a production process started inside a checkout would
+otherwise inherit `.env.local` and run on a personal key.
+
+Copy `.env.example` to `.env.local` and put real keys there (gitignored).
+`.env.production.example` is the deployment contract. Precedence is
+`process environment > env files > defaults`. Credentials are `SecretStr`,
+so printing `Settings` renders a mask.
+
+```bash
+python scripts/production_config_check.py   # deployment preflight; exit 0 = usable
+```
+
+Providers: `mock` (default, no credentials), `gemini`, `xai`, `omniroute`,
+`openai_compatible`. See
+[docs/PHASE_5_PROVIDER_CONFIGURATION.md](docs/PHASE_5_PROVIDER_CONFIGURATION.md).
+
 ## Setup
 
 ```bash
