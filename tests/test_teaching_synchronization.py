@@ -20,6 +20,7 @@ from code2shorts.ai.contracts import (
 from code2shorts.core.models import ExecutionTrace, TraceEvent, TraceEventType
 from code2shorts.narration import (
     align_narration,
+    validate_each_moment_is_narrated_once,
     fit_plan_to_narration,
     validate_teaching_synchronization,
 )
@@ -225,3 +226,205 @@ def test_the_timeline_carries_no_duration_budget() -> None:
             "MAX_DURATION", "MAX_VIDEO_SECONDS", "TARGET_DURATION", "MAX_STEPS",
         }:
             pytest.fail(f"a duration budget appeared in the timeline: {node.id}")
+
+
+# ---- content, not just timing --------------------------------------------
+
+
+def _content_trace():
+    return ExecutionTrace(
+        algorithm_name="Main", language="java", input="RACECAR", output="true",
+        succeeded=True, exit_code=0,
+        events=[
+            TraceEvent(step_index=0, event_type=TraceEventType.VARIABLE_ASSIGN.value,
+                       variable_name="left", new_value="0", line_number=5,
+                       description="left = 0"),
+            TraceEvent(step_index=1, event_type=TraceEventType.VARIABLE_ASSIGN.value,
+                       variable_name="right", new_value="6", line_number=6,
+                       description="right = 6"),
+        ],
+    )
+
+
+def _content_case(texts: list[str]):
+    from code2shorts.narration import validate_narration_describes_its_moment
+
+    plan = _plan([1.0, 1.0])
+    narration = NarrationResponse(
+        segments=[
+            NarrationSegment(order=i, text=texts[i], visualization_step_order=i)
+            for i in range(2)
+        ]
+    )
+    audio = _audio([0.5, 0.5])
+    alignment = align_narration(narration, plan, audio_by_segment=audio)
+    return validate_narration_describes_its_moment(alignment, plan, _content_trace())
+
+
+def test_narration_about_its_own_state_passes() -> None:
+    result = _content_case(
+        ["The left pointer starts at 0.", "The right pointer starts at index 6."]
+    )
+    assert result.passed, result.errors
+
+
+def test_narration_describing_a_different_moment_is_caught() -> None:
+    """The failure the timing check cannot see: correct window, wrong
+    subject. Segment 0's moment is about `left`, but it talks about
+    `right`."""
+    result = _content_case(
+        ["The right pointer starts at index 6.", "The right pointer starts at index 6."]
+    )
+    assert not result.passed
+    assert any("mentions" in e for e in result.errors)
+
+
+def test_ordinary_prose_is_not_flagged() -> None:
+    """Narration may reason. Only naming ANOTHER moment's variable while
+    naming none of its own counts as describing the wrong state."""
+    result = _content_case(
+        ["We begin at the very start of the array.", "And at the far end."]
+    )
+    assert result.passed, result.errors
+
+
+def test_the_content_check_never_rewrites_or_shortens_narration() -> None:
+    import ast
+    import inspect
+
+    from code2shorts.narration import alignment as module
+
+    source = inspect.getsource(module.validate_narration_describes_its_moment)
+    tree = ast.parse(inspect.cleandoc(source).replace("def ", "def ", 1))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            assert node.func.attr not in ("truncate", "shorten", "trim")
+
+
+# ---- one moment, one set of words -----------------------------------------
+
+
+def _pointer_trace() -> ExecutionTrace:
+    """A trace whose scalars actually MOVE, so two steps can differ in what
+    they show. `_trace()` records no variables, and a repetition check that
+    compares visible state has nothing to compare there."""
+    values = [("left", "0"), ("right", "6"), ("left", "1"), ("right", "5")]
+    return ExecutionTrace(
+        algorithm_name="Main", language="java", input="RACECAR", output="true",
+        succeeded=True, exit_code=0,
+        events=[
+            TraceEvent(
+                step_index=i,
+                event_type=TraceEventType.VARIABLE_ASSIGN.value,
+                description=f"{name} = {value}",
+                line_number=i + 5,
+                variable_name=name,
+                new_value=value,
+            )
+            for i, (name, value) in enumerate(values)
+        ],
+    )
+
+
+def _narration_with(texts: list[str]):
+    return NarrationResponse(
+        segments=[
+            NarrationSegment(order=i, text=text, visualization_step_order=i)
+            for i, text in enumerate(texts)
+        ]
+    )
+
+
+def test_distinct_narration_per_moment_passes() -> None:
+    plan = _plan([1.0, 1.0, 1.0])
+    narration = _narration_with(
+        ["Left starts at zero.", "Right starts at six.", "The pointers compare."]
+    )
+    audio = _audio([2.0, 2.0, 2.0])
+    alignment, fitted = _aligned(plan, narration, audio)
+
+    assert validate_each_moment_is_narrated_once(
+        alignment, fitted, _pointer_trace()
+    ).passed
+
+
+def test_a_repeated_sentence_over_two_different_states_is_reported() -> None:
+    """The Phase 6 defect: a model handed the same sentence to consecutive
+    steps, so the second visual state was described by words written for
+    the first. Every timing validator still passed."""
+    plan = _plan([1.0, 1.0, 1.0, 1.0])
+    repeated = "The characters match, so the pointers move inward."
+    narration = _narration_with([repeated, repeated, "Compare again.", "Done."])
+    audio = _audio([2.0, 2.0, 2.0, 2.0])
+    alignment, fitted = _aligned(plan, narration, audio)
+
+    result = validate_each_moment_is_narrated_once(alignment, fitted, _pointer_trace())
+    assert not result.passed
+    assert "repeats the narration" in result.errors[0]
+
+
+def test_repetition_over_an_UNCHANGED_state_is_allowed() -> None:
+    """Section 15 draws the line at MATERIAL difference, not at sameness of
+    text. Two steps that show the same values are one coherent teaching
+    moment however the planner split them, and one sentence may cover it."""
+    trace = ExecutionTrace(
+        algorithm_name="Main", language="java", input="RACECAR", output="true",
+        succeeded=True, exit_code=0,
+        events=[
+            TraceEvent(
+                step_index=i,
+                event_type=TraceEventType.CONDITION_EVALUATED.value,
+                description="same state",
+                line_number=7,
+            )
+            for i in range(3)
+        ],
+    )
+    plan = _plan([1.0, 1.0, 1.0])
+    repeated = "The pointers are at opposite ends."
+    narration = _narration_with([repeated, repeated, "Now compare."])
+    audio = _audio([2.0, 2.0, 2.0])
+    alignment, fitted = _aligned(plan, narration, audio)
+
+    assert validate_each_moment_is_narrated_once(alignment, fitted, trace).passed
+
+
+def test_repetition_is_detected_regardless_of_whitespace_or_case() -> None:
+    plan = _plan([1.0, 1.0, 1.0, 1.0])
+    narration = _narration_with(
+        ["The  pointers move inward.", "the pointers move INWARD.", "a", "b"]
+    )
+    audio = _audio([2.0, 2.0, 2.0, 2.0])
+    alignment, fitted = _aligned(plan, narration, audio)
+
+    assert not validate_each_moment_is_narrated_once(
+        alignment, fitted, _pointer_trace()
+    ).passed
+
+
+def test_the_same_sentence_far_apart_is_not_reported() -> None:
+    """Only CONSECUTIVE repetition is the defect. A phrase that recurs
+    later in a lesson is ordinary teaching - a refrain, not a moment
+    described by another moment's words."""
+    plan = _plan([1.0, 1.0, 1.0, 1.0])
+    line = "The pointers move toward the centre."
+    narration = _narration_with([line, "Left becomes one.", line, "Done."])
+    audio = _audio([2.0, 2.0, 2.0, 2.0])
+    alignment, fitted = _aligned(plan, narration, audio)
+
+    assert validate_each_moment_is_narrated_once(
+        alignment, fitted, _pointer_trace()
+    ).passed
+
+
+def test_the_validator_never_edits_the_narration() -> None:
+    """ADR-5.11: reporting is allowed, shortening is not."""
+    plan = _plan([1.0, 1.0, 1.0, 1.0])
+    repeated = "Both characters match."
+    narration = _narration_with([repeated, repeated, "a", "b"])
+    audio = _audio([2.0, 2.0, 2.0, 2.0])
+    alignment, fitted = _aligned(plan, narration, audio)
+
+    before = [segment.text for segment in alignment.segments]
+    validate_each_moment_is_narrated_once(alignment, fitted, _pointer_trace())
+    assert [segment.text for segment in alignment.segments] == before

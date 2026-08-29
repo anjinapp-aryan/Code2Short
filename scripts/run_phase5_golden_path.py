@@ -47,6 +47,8 @@ from code2shorts.narration import (  # noqa: E402
     fit_plan_to_narration,
     validate_alignment,
     validate_srt,
+    validate_each_moment_is_narrated_once,
+    validate_narration_describes_its_moment,
     validate_teaching_synchronization,
 )
 from code2shorts.narration.subtitles import write_srt  # noqa: E402
@@ -70,6 +72,10 @@ from tests.java_fixtures import load_algorithm_fixture, load_java_fixture  # noq
 ALGORITHMS = {
     "reverse_string": ("fixture", "correct", "HELLO", "OLLEH"),
     "palindrome": ("algorithm", "palindrome", "RACECAR", "true"),
+    # Phase 6.1 section 12: the same source with an input that MISMATCHES,
+    # so the early `return false` path is exercised and its narration can
+    # be checked against a visible mismatch rather than a visible match.
+    "palindrome_negative": ("algorithm", "palindrome", "RACE", "false"),
     "two_sum": ("algorithm", "two_sum", "9", "0,1"),
     "move_zeroes": ("algorithm", "move_zeroes", "", "1,3,12,0,0"),
     "remove_duplicates": ("algorithm", "remove_duplicates", "", "3"),
@@ -332,6 +338,11 @@ def main() -> int:
     sync = validate_teaching_synchronization(alignment, plan, trace)
     print(f"teaching sync    : {'PASS' if sync.passed else 'FAIL ' + str(sync.errors[:3])}")
 
+    content = validate_narration_describes_its_moment(alignment, plan, trace)
+    distinct = validate_each_moment_is_narrated_once(alignment, plan, trace)
+    print(f"narration content: {'PASS' if content.passed else 'WARN ' + str(content.errors[:2])}")
+    print(f"moment distinct : {'PASS' if distinct.passed else 'FAIL ' + str(distinct.errors[:2])}")
+
     srt_path = write_srt(alignment, out / "subtitles.srt")
     print(f"subtitles: valid={validate_srt(srt_path.read_text(encoding='utf-8')).passed}")
 
@@ -380,8 +391,38 @@ def main() -> int:
     print(f"repair attempts consumed: {repairs}")
     print("\ntimings:", {k: round(v, 2) for k, v in timings.items()})
     print(f"workflow events: {len(events)}")
+    # Phase 6 section 25: the reviewer must be able to re-open and audit
+    # this run later, so the inputs to every visual claim are persisted
+    # next to the MP4 rather than left in the workflow's memory.
+    _persist(out, trace=trace, plan=plan, alignment=alignment,
+             report=report, timeline=timeline, sync=sync, content=content,
+             distinct=distinct)
+
     print(f"\nfinal artifact: {final.resolve()}")
     return 0 if (report.passed and timeline.passed) else 1
+
+
+
+def _persist(out: Path, **artifacts) -> None:
+    """Write the run's evidence beside the video, as JSON where possible.
+
+    Deliberately best-effort per artifact: a model object that will not
+    serialise must not cost the reviewer the rest of the evidence, and it
+    must never fail a run whose video is already validated.
+    """
+    import json
+
+    for name, value in artifacts.items():
+        path = out / f"{name}.json"
+        try:
+            if hasattr(value, "model_dump_json"):
+                path.write_text(value.model_dump_json(indent=2), encoding="utf-8")
+            else:
+                path.write_text(
+                    json.dumps(value, indent=2, default=str), encoding="utf-8"
+                )
+        except (TypeError, ValueError, OSError) as error:
+            print(f"  (could not persist {name}: {error})")
 
 
 def _concat_audio(alignment, output_path: Path) -> Path:

@@ -33,6 +33,8 @@ from code2shorts.visualization.primitives import (
     array_row,
     caption_text,
     code_panel,
+    compose_vertical,
+    fit_window_radius,
     map_panel,
     pointer_arrows,
     sequence_panel,
@@ -128,13 +130,35 @@ def build_scene_source(
         # highlight follows actual execution.
         location = locations.get(step.trace_event_index)
         if location is not None and source_files:
-            code_state = build_code_state(location, source_files, window_radius)
+            # Visible line count follows the CANVAS, not a constant. A
+            # window of long lines is width-bound, so its text is small
+            # and the spare height is better spent on more context than
+            # left black; a window of short lines is height-bound and
+            # keeps the minimum. See primitives.fit_window_radius.
+            radius = fit_window_radius(
+                location, source_files, minimum=window_radius
+            )
+            code_state = build_code_state(location, source_files, radius)
             if code_state.lines:
                 step_body += code_panel(code_state, var="code_group")
                 groups.append("code_group")
 
         step_body += caption_text(step.narration_text, var="caption")
         groups.append("caption")
+
+        # Content-aware composition of the LOWER region. The bands above
+        # stay fixed so the array never jumps between steps; below them the
+        # caption is pulled up under whatever was actually drawn and the
+        # code panel takes every remaining unit of height. Without this the
+        # code band was a constant sized for the worst-case caption, so a
+        # short caption left ~255 px of unreachable black on the canvas.
+        structure_vars = [name for name in groups if name.endswith("_group")
+                          and name != "code_group"]
+        step_body += compose_vertical(
+            structure_vars,
+            caption_var="caption",
+            code_var="code_group" if "code_group" in groups else None,
+        )
 
         # Replace the previous step's visuals rather than stacking them —
         # this is what stops elements overlapping as the video progresses.

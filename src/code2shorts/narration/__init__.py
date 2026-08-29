@@ -12,6 +12,8 @@ from code2shorts.narration.alignment import (
     AlignmentResult,
     align_narration,
     validate_alignment,
+    validate_each_moment_is_narrated_once,
+    validate_narration_describes_its_moment,
     validate_teaching_synchronization,
 )
 from code2shorts.narration.fitting import (
@@ -44,6 +46,8 @@ __all__ = [
     "build_srt",
     "sanitize_subtitle_text",
     "validate_alignment",
+    "validate_each_moment_is_narrated_once",
+    "validate_narration_describes_its_moment",
     "validate_teaching_synchronization",
     "validate_narration",
     "validate_srt",

@@ -103,8 +103,119 @@ def validate_visualization_plan(
                 )
 
     errors += _array_and_pointer_errors(plan, trace)
+    errors += _future_state_narration_errors(plan, trace)
 
     return ValidationResult(stage="semantic", passed=not errors, errors=errors)
+
+
+# Numbers a narrator says out loud. A closed, tiny table rather than an
+# English parser: the only tokens that matter are the ones that could name
+# a value the trace actually recorded, and traced values are small
+# integers and single characters. Anything outside this table and the
+# digits is ignored, so ordinary prose can never be misread as a claim.
+_SPOKEN_NUMBERS = {
+    "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
+    "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
+    "ten": "10", "eleven": "11", "twelve": "12", "thirteen": "13",
+    "fourteen": "14", "fifteen": "15", "sixteen": "16", "seventeen": "17",
+    "eighteen": "18", "nineteen": "19", "twenty": "20",
+}
+
+
+def _future_state_narration_errors(
+    plan: VisualizationPlanResponse, trace: ExecutionTrace
+) -> list[str]:
+    """Phase 6.1: narration must not assert a value the screen does not show.
+
+    The defect this closes: one educational moment expanded into several
+    visualization steps, and the moment's sentence was copied into every
+    one of them. A step whose frame showed `left = 0, right = 6` narrated
+    "left becomes 1 and right becomes 5" — a state several events in the
+    future. Every timing validator passed, because timing was never the
+    problem.
+
+    The check is STRUCTURED, not lexical (section 9). Both the vocabulary
+    and the values come from the trace:
+
+      * variable names are exactly the scalars the reconstructed frame
+        holds at this step — nothing else is looked for;
+      * a token only counts as a claim if it equals that variable's value
+        at some OTHER step of the plan.
+
+    So a number that never appears as a value of that variable anywhere in
+    the run is ignored, and prose like "move both pointers inward" asserts
+    nothing at all. Only the one failure mode is reported: this step says
+    the variable holds a value it will hold LATER.
+
+    Deliberately silent about the past. Narration may recap ("they matched
+    at index zero"), and a recap of something the learner has already seen
+    is teaching, not desynchronization.
+    """
+    from code2shorts.visualization.state import reconstruct_frames
+
+    errors: list[str] = []
+    frames = {frame.step_index: frame for frame in reconstruct_frames(trace)}
+
+    ordered = [
+        (step, frames[step.trace_event_index])
+        for step in plan.steps
+        if step.trace_event_index in frames
+    ]
+
+    for position, (step, frame) in enumerate(ordered):
+        later_values: dict[str, set[str]] = {}
+        for _, future_frame in ordered[position + 1 :]:
+            for name, value in future_frame.scalars.items():
+                later_values.setdefault(name, set()).add(value)
+
+        for name, current in frame.scalars.items():
+            future = later_values.get(name, set()) - {current}
+            if not future:
+                continue
+            claimed = _values_claimed_for(step.narration_text, name, frame.scalars)
+            ahead = sorted(claimed & future)
+            if ahead:
+                errors.append(
+                    f"step {step.order} shows {name}={current} but its narration "
+                    f"asserts {name}={ahead[0]}, a value it only reaches later — "
+                    "narration must not describe a state the learner cannot see"
+                )
+
+    return errors
+
+
+def _values_claimed_for(
+    text: str, name: str, all_scalars: dict[str, str]
+) -> set[str]:
+    """Values the narration attributes to `name`, using a closed vocabulary.
+
+    The span examined runs from a mention of `name` up to the next mention
+    of any OTHER traced variable, so "left becomes 1 and right becomes 5"
+    attributes 1 to left and 5 to right rather than both to both.
+    """
+    tokens = re.split(r"[^A-Za-z0-9_]+", text)
+    others = {other.lower() for other in all_scalars if other != name}
+    lowered = name.lower()
+
+    claimed: set[str] = set()
+    inside = False
+    for token in tokens:
+        if not token:
+            continue
+        token_lower = token.lower()
+        if token_lower == lowered:
+            inside = True
+            continue
+        if token_lower in others:
+            inside = False
+            continue
+        if not inside:
+            continue
+        if token.isdigit():
+            claimed.add(token)
+        elif token_lower in _SPOKEN_NUMBERS:
+            claimed.add(_SPOKEN_NUMBERS[token_lower])
+    return claimed
 
 
 def _array_and_pointer_errors(

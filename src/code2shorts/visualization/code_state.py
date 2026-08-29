@@ -118,6 +118,45 @@ def resolve_source_locations(
     return locations
 
 
+
+def enclosing_block(lines: list[str], line: int) -> tuple[int, int] | None:
+    """The brace-delimited block containing `line`, as 1-based inclusive
+    bounds, or None if it cannot be determined confidently.
+
+    Purely structural — it counts braces and knows nothing about methods,
+    classes or algorithms. A learner following execution inside one method
+    is not helped by the file's package declaration or the `main` wrapper
+    scrolling past, so when the enclosing block fits the visible window the
+    renderer prefers it over a window centred blindly on the cursor.
+
+    Returns None for a block that would not fit; the caller then falls back
+    to the centred window, which always contains the executing line.
+    """
+    if line < 1 or line > len(lines):
+        return None
+
+    # Walk backwards to the innermost unclosed '{' that opens a block
+    # containing this line.
+    depth = 0
+    start: int | None = None
+    for index in range(line - 1, -1, -1):
+        text = lines[index]
+        depth += text.count("}") - text.count("{")
+        if depth < 0:                      # found an unmatched opener
+            start = index + 1              # 1-based
+            break
+    if start is None:
+        return None
+
+    depth = 0
+    for index in range(start - 1, len(lines)):
+        text = lines[index]
+        depth += text.count("{") - text.count("}")
+        if depth == 0 and index + 1 >= line:
+            return start, index + 1
+    return None
+
+
 def build_code_state(
     location: SourceLocation,
     source_files: dict[str, str],
@@ -153,11 +192,34 @@ def build_code_state(
             truncated=False,
         )
 
-    # Center the window on the executing line, then clamp so a line near
-    # either end of the file still yields a full-size window.
-    start = max(1, location.line - window_radius)
-    end = min(total, start + window_size - 1)
-    start = max(1, end - window_size + 1)
+    # Prefer the enclosing block when it fits: following execution inside
+    # one method is clearer than a window centred blindly on the cursor,
+    # which drags in the package declaration or the main() wrapper. Falls
+    # back to the centred window whenever the block does not fit.
+    block = enclosing_block(all_lines, location.line)
+    if block is not None and block[1] - block[0] + 1 <= window_size:
+        start, end = block
+        # Spend any spare room on context after the block rather than
+        # leaving the panel half empty.
+        spare = window_size - (end - start + 1)
+        if spare > 0:
+            # Split the spare room ABOVE and below. Spending it all
+            # downward left the executing line pinned to the top of the
+            # panel: at `if (a != b)` the window began on that very line,
+            # so the two reads it compares — `char a = chars[left]` and
+            # `char b = chars[right]`, named in the caption — were off
+            # screen. Context is what makes the active line mean anything
+            # (section 9), and half of it lives above.
+            above = spare // 2
+            start = max(1, start - above)
+            end = min(total, start + window_size - 1)
+            start = max(1, end - window_size + 1)
+    else:
+        # Center the window on the executing line, then clamp so a line near
+        # either end of the file still yields a full-size window.
+        start = max(1, location.line - window_radius)
+        end = min(total, start + window_size - 1)
+        start = max(1, end - window_size + 1)
 
     lines, start_line = _trim_blank_edges(
         all_lines[start - 1 : end], start, location.line

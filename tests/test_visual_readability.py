@@ -26,6 +26,7 @@ from code2shorts.visualization import primitives
 from code2shorts.visualization.code_state import DEFAULT_WINDOW_RADIUS
 from code2shorts.visualization.manim_renderer import build_scene_source
 from code2shorts.visualization.renderer import RenderContext
+from code2shorts.visualization.state import ArraySnapshot, FrameState
 
 
 def _trace() -> ExecutionTrace:
@@ -223,15 +224,52 @@ def test_stacked_pointer_labels_also_clear_the_scalar_readout() -> None:
     assert _pointer_top(depth=1) < primitives.SCALARS_Y - 0.15
 
 
+def test_converged_pointers_draw_exactly_one_arrow() -> None:
+    """Two pointers on one cell get one arrow, not one each.
+
+    An arrow per pointer starts above the whole label stack, so its shaft
+    is drawn straight through every label below it — the convergence
+    frame rendered the word "left" with a line struck through it.
+    """
+    state = FrameState(
+        step_index=0,
+        event_type=TraceEventType.VARIABLE_ASSIGN.value,
+        line_number=7,
+        description="converged",
+        arrays={
+            "chars": ArraySnapshot(name="chars", cells=list("RACECAR")),
+        },
+        scalars={"left": "3", "right": "3"},
+    )
+    source = "\n".join(primitives.pointer_arrows(state))
+    assert source.count("Arrow(") == 1
+    # Both labels still exist — only the redundant arrow is dropped.
+    assert source.count("Text(") == 2
+
+
 def test_the_caption_clears_the_array_index_row() -> None:
     caption_top = primitives.CAPTION_Y + primitives.CAPTION_MAX_HEIGHT / 2
     assert caption_top < _array_bottom()
 
 
 def test_the_caption_clears_the_code_panel() -> None:
-    caption_bottom = primitives.CAPTION_Y - primitives.CAPTION_MAX_HEIGHT / 2
-    code_top = primitives.CODE_Y + primitives.CODE_MAX_HEIGHT / 2
-    assert caption_bottom > code_top
+    """Caption and code cannot overlap - now by construction, not by two
+    constants that happen not to collide.
+
+    The composer places the caption first and derives the code panel's top
+    from the caption's MEASURED bottom minus a positive gap, so the
+    separation holds for any caption length rather than only for the
+    worst case the old fixed bands were sized against.
+    """
+    source = "\n".join(
+        primitives.compose_vertical(["arr_group"], "caption", "code_group")
+    )
+    assert "_code_top = caption.get_bottom()[1] - " in source
+    assert primitives.BAND_GAP > 0
+    # And the panel is placed by hanging its own measured height off that
+    # top edge, so growing the code can never push it back up into the
+    # caption.
+    assert "code_group.move_to([0, _code_top - code_group.height / 2, 0])" in source
 
 
 def test_the_code_panel_stays_inside_the_safe_bottom() -> None:
@@ -245,3 +283,96 @@ def test_the_code_band_is_the_largest_single_region() -> None:
     assert primitives.CODE_MAX_HEIGHT > primitives.CAPTION_MAX_HEIGHT
     assert primitives.CODE_MAX_HEIGHT > primitives.STRUCTURE_MAX_HEIGHT
     assert primitives.CODE_MAX_HEIGHT * primitives.PIXELS_PER_UNIT >= 550
+
+
+# ---- code contrast and focus (Phase 6.1 third pass) -----------------------
+#
+# "The surrounding code is too faint" was caused by two compounding things:
+# non-active lines dimmed to 0.45, and Manim's default syntax theme, whose
+# comment/type colours sit close to a dark panel background.
+
+
+def test_context_lines_stay_readable() -> None:
+    """Context is what makes the active line make sense; it may be
+    de-emphasised but never near-invisible."""
+    assert primitives.CONTEXT_LINE_OPACITY >= primitives.MIN_CONTEXT_LINE_OPACITY
+
+
+def _code_panel_source() -> str:
+    """The emitted code panel for a real windowed CodeState."""
+    from code2shorts.core.models import SourceLocation
+    from code2shorts.visualization.code_state import build_code_state
+
+    files = {"Main.java": "\n".join(f"int v{i} = {i};" for i in range(1, 13))}
+    state = build_code_state(SourceLocation(file="Main.java", line=6), files)
+    return "\n".join(primitives.code_panel(state))
+
+
+def test_the_code_panel_declares_an_explicit_syntax_theme() -> None:
+    """Manim's default theme targets an editor, not a phone. The chosen one
+    was picked by measuring rendered ink, not by taste — see the table in
+    primitives.py."""
+    source = _code_panel_source()
+    assert "formatter_style=" in source
+    assert primitives.CODE_THEME in source
+
+
+def test_the_active_line_leads_by_its_own_emphasis() -> None:
+    """It must be prominent because IT is highlighted, not because
+    everything else was hidden."""
+    source = _code_panel_source()
+    assert "fill_opacity" in source          # filled highlight
+    assert "set_opacity(1.0 if" in source    # active line at full opacity
+
+
+def test_the_code_window_prefers_the_enclosing_block() -> None:
+    """Following execution inside one method beats a window centred blindly
+    on the cursor, which drags in the package declaration."""
+    from code2shorts.visualization.code_state import enclosing_block
+
+    lines = [
+        "package a.b;",              # 1
+        "",                          # 2
+        "class Main {",              # 3
+        "    int f() {",             # 4
+        "        int x = 0;",        # 5
+        "        return x;",         # 6
+        "    }",                     # 7
+        "}",                         # 8
+    ]
+    assert enclosing_block(lines, 5) == (4, 7)
+
+
+def test_the_block_window_still_contains_the_executing_line() -> None:
+    """Whatever window is chosen, the highlighted line must be inside it —
+    the Phase 4.5.1 invariant does not bend for focus."""
+    from code2shorts.core.models import SourceLocation
+    from code2shorts.visualization.code_state import build_code_state
+
+    body = "\n".join(
+        ["package a.b;", "", "public class Main {", "    int f() {"]
+        + [f"        int v{i} = {i};" for i in range(20)]
+        + ["        return 0;", "    }", "}"]
+    )
+    files = {"Main.java": body}
+
+    for line in (6, 10, 18, 24):
+        state = build_code_state(SourceLocation(file="Main.java", line=line), files)
+        assert state.highlight_line == line
+        assert state.start_line <= line < state.start_line + len(state.lines)
+        assert state.highlight_offset is not None
+
+
+def test_no_algorithm_name_influences_the_code_window() -> None:
+    """Focus is structural (brace counting), never keyed to an algorithm."""
+    import ast
+    import inspect
+
+    from code2shorts.visualization import code_state
+
+    tree = ast.parse(inspect.getsource(code_state))
+    forbidden = {"palindrome", "two_sum", "binary_search", "reverse_string",
+                 "move_zeroes", "balanced_parens"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            assert node.value.strip().lower() not in forbidden

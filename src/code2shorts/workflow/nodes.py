@@ -512,7 +512,7 @@ class EducationalPlanNode(WorkflowNode):
         )
 
 
-DEFAULT_VISUALIZATION_PROMPT_VERSION = "v2"
+DEFAULT_VISUALIZATION_PROMPT_VERSION = "v3"   # v3: per-event state, per-step narration
 
 
 def build_visualization_prompt(
@@ -522,17 +522,39 @@ def build_visualization_prompt(
 ) -> str:
     from code2shorts.ai.contracts import VisualAction
 
+    from code2shorts.visualization.state import reconstruct_frames
+
     lines = [
         f"Create a visualization plan for {trace.algorithm_name}, grounded ONLY "
         "in the trace events below.",
         "Every step's trace_event_index MUST be a real step_index from the "
         "trace, and steps must reference events in non-decreasing order.",
         "visual_action must be exactly one of: " + ", ".join(a.value for a in VisualAction),
+        # Phase 6.1. Each step's narration is spoken while THAT step's state
+        # is on screen, so a sentence copied from a lesson moment into
+        # several steps ends up telling the learner about values they
+        # cannot see yet. The state after each event is listed below
+        # precisely so each step can be described in its own terms.
+        "Each step's narration_text is spoken WHILE that step's state is on "
+        "screen. Describe that state, or the action about to happen in "
+        "words ('the pointers move inward'). NEVER state a variable's "
+        "later value: if the step shows left=0, its narration must not say "
+        "left is 1 or 'left becomes 1'. Give each step its own sentence - "
+        "do not repeat one sentence across steps whose state differs.",
         f"Explanation summary: {explanation.summary}",
-        "Trace events:",
+        "Trace events, with the state visible AFTER each one:",
     ]
+    frames = {frame.step_index: frame for frame in reconstruct_frames(trace)}
     for event in trace.events:
-        lines.append(f"  [{event.step_index}] {event.event_type}: {event.description}")
+        frame = frames.get(event.step_index)
+        state = ""
+        if frame is not None and frame.scalars:
+            state = "  | state: " + ", ".join(
+                f"{name}={value}" for name, value in sorted(frame.scalars.items())
+            )
+        lines.append(
+            f"  [{event.step_index}] {event.event_type}: {event.description}{state}"
+        )
 
     if education is not None:
         # The lesson decides WHAT matters; this prompt only decides how to

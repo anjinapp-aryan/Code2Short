@@ -18,6 +18,8 @@ plan-declared visual duration or a real measured audio duration.
 
 from __future__ import annotations
 
+import re
+
 from pydantic import BaseModel, Field
 
 from code2shorts.ai.contracts import NarrationResponse, VisualizationPlanResponse
@@ -251,5 +253,144 @@ def validate_teaching_synchronization(
                 "the learner hears the steps out of order"
             )
         previous_step_order = order
+
+    return ValidationResult(stage="domain", passed=not errors, errors=errors)
+
+
+def validate_each_moment_is_narrated_once(
+    result: AlignmentResult,
+    plan: VisualizationPlanResponse,
+    trace: "ExecutionTrace",
+) -> ValidationResult:
+    """The same words may not be spoken over materially different states.
+
+    Section 15 draws the line deliberately: identical narration is NOT
+    automatically wrong. A sentence like "the pointers move inward" can
+    legitimately accompany the movement, and two adjacent steps that show
+    the same values are one coherent teaching moment however they were
+    planned. What is wrong is one paragraph read out while the visible
+    state moves on beneath it — the learner hears a description of a
+    picture that is no longer on screen.
+
+    So the comparison is against the reconstructed FrameState, not against
+    the text alone: repetition is reported only when the two steps differ
+    in what they SHOW (their scalars or their array contents).
+
+    Observed on a real run: six consecutive segments repeated one
+    moment's sentence while left/right advanced 0/6 -> 1/5. Reported, never
+    rewritten — shortening narration is prohibited (ADR-5.11), and the
+    repair belongs to the planning stage.
+    """
+    from code2shorts.visualization.state import reconstruct_frames
+
+    frames = {frame.step_index: frame for frame in reconstruct_frames(trace)}
+    steps = {step.order: step for step in plan.steps}
+
+    def visible(order: int):
+        step = steps.get(order)
+        if step is None:
+            return None
+        frame = frames.get(step.trace_event_index)
+        if frame is None:
+            return None
+        arrays = {
+            name: tuple(snapshot.cells) for name, snapshot in frame.arrays.items()
+        }
+        return (tuple(sorted(frame.scalars.items())), tuple(sorted(arrays.items())))
+
+    errors: list[str] = []
+    previous_text: str | None = None
+    previous_id: str | None = None
+    previous_state: object = None
+
+    for segment in result.segments:
+        text = " ".join(segment.text.split()).strip().lower()
+        state = visible(segment.visualization_step_order)
+        if (
+            text
+            and text == previous_text
+            and state is not None
+            and previous_state is not None
+            and state != previous_state
+        ):
+            errors.append(
+                f"segment {segment.segment_id} repeats the narration of "
+                f"{previous_id} while the visible state changed, so one of "
+                "the two states is described by words written for the other"
+            )
+        previous_text = text
+        previous_id = segment.segment_id
+        previous_state = state
+
+    return ValidationResult(stage="domain", passed=not errors, errors=errors)
+
+
+def validate_narration_describes_its_moment(
+    result: AlignmentResult,
+    plan: VisualizationPlanResponse,
+    trace: "ExecutionTrace",
+    min_overlap: int = 1,
+) -> ValidationResult:
+    """Does the SPEECH for a moment talk about that moment's state?
+
+    `validate_teaching_synchronization` proves the timing lines up. It
+    cannot tell whether the words describe the right thing: a segment can
+    occupy exactly the correct window and still explain the next
+    iteration. This is the content half.
+
+    The check is deliberately weak and one-directional. It only asks
+    whether a segment mentions ANY concrete token from the trace event its
+    step cites — a variable name, an index, or a value. Narration is prose
+    and may legitimately reason, so this reports a WARNING-shaped failure
+    for segments that mention nothing from their own moment while naming a
+    different moment's variable instead. It never rewrites narration and
+    never shortens it.
+    """
+    errors: list[str] = []
+    steps = {step.order: step for step in plan.steps}
+    events = {event.step_index: event for event in trace.events}
+
+    def tokens_of(event) -> set[str]:
+        raw = " ".join(
+            filter(None, [event.variable_name, event.new_value, event.old_value])
+        )
+        found = {piece for piece in re.split(r"[^A-Za-z0-9_]+", raw) if piece}
+        return {piece for piece in found if len(piece) > 1 or piece.isdigit()}
+
+    all_variables = {
+        event.variable_name.split("[", 1)[0]
+        for event in trace.events
+        if event.variable_name
+    }
+
+    for segment in result.segments:
+        step = steps.get(segment.visualization_step_order)
+        if step is None:
+            continue
+        event = events.get(step.trace_event_index)
+        if event is None:
+            continue
+
+        mine = tokens_of(event)
+        if not mine:
+            continue                      # nothing concrete to check against
+
+        spoken = {
+            piece for piece in re.split(r"[^A-Za-z0-9_]+", segment.text) if piece
+        }
+        overlap = len(mine & spoken)
+        if overlap >= min_overlap:
+            continue
+
+        # It mentions nothing from its own moment. Only complain when it
+        # names some OTHER traced variable, which is the "describes a
+        # different state" failure rather than ordinary prose.
+        others = (all_variables & spoken) - mine
+        if others:
+            errors.append(
+                f"segment {segment.segment_id} narrates step "
+                f"{segment.visualization_step_order} (about {sorted(mine)}) but "
+                f"mentions {sorted(others)} instead"
+            )
 
     return ValidationResult(stage="domain", passed=not errors, errors=errors)

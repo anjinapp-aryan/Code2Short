@@ -14,7 +14,8 @@ visualization library.
 
 from __future__ import annotations
 
-from code2shorts.visualization.code_state import CodeState
+from code2shorts.core.models import SourceLocation
+from code2shorts.visualization.code_state import CodeState, build_code_state
 from code2shorts.visualization.state import FrameState
 
 # 9:16 teaching layout, for the REAL frame: 4.5 units wide x 8 tall.
@@ -63,11 +64,48 @@ SCALAR_FONT_SIZE = 34           # variable readout
 POINTER_FONT_SIZE = 30          # pointer labels above the array
 CODE_FONT_SIZE = 20             # Code() default; real size is set by width
 
+# Syntax theme, chosen by MEASUREMENT rather than taste. Rendering the
+# same snippet under each candidate and measuring the code region:
+#
+#   default      ink 3.68%  strong 2.06%  mean-ink 157.2
+#   monokai      ink 4.26%  strong 2.56%  mean-ink 168.5   <- chosen
+#   github-dark  ink 3.88%  strong 2.36%  mean-ink 162.7
+#   one-dark     ink 4.21%  strong 1.93%  mean-ink 138.4
+#
+# Manim's default theme targets an editor, not a phone at arm's length;
+# its comment and type colours sit close to the panel background.
+CODE_THEME = "monokai"
+
+# How far NON-executing lines are dimmed. This was 0.45, which is the
+# direct cause of "the surrounding code is too faint": at 45% against a
+# dark panel, darker syntax colours fall to near-background. Context
+# lines must stay readable — they are what makes the active line make
+# sense — so the active line leads by highlight and weight, not by
+# everything else being hidden.
+CONTEXT_LINE_OPACITY = 0.78
+MIN_CONTEXT_LINE_OPACITY = 0.70   # readability floor, asserted by test
+
 # The code panel is the primary teaching surface, so it gets the largest
 # band and is fitted to the safe WIDTH (not shrunk to fit leftover space).
 CODE_MAX_WIDTH = SAFE_WIDTH             # 4.14 units = 994 px
 CODE_MAX_HEIGHT = 2.50                  # 600 px
-MIN_CODE_LINE_HEIGHT_UNITS = 0.20       # 48 px per line — readability floor
+MIN_CODE_LINE_HEIGHT_UNITS = 0.20       # 48 px per line — GROWTH TARGET:
+                                        # the window fitter will not add a
+                                        # line that pushes below this.
+
+# The floor the renderer can actually GUARANTEE, which is set by the source
+# and not by the layout. The panel is monospace and fitted to the 994 px
+# safe width, so the longest visible line fixes the glyph size:
+#
+#     994 px / 53 chars = 18.8 px per character
+#     monospace line height ~= 2.34x character width = 44 px = 0.183 units
+#
+# 53 characters is a real Java method signature in the supported fixtures
+# ("    public static boolean isPalindrome(char[] chars) {"). A window
+# containing it CANNOT reach 0.20 units per line at 1080 px wide, and no
+# layout change fixes that — only a shorter source line would. Measured,
+# not assumed; the value is asserted by the real-render tests.
+ABS_MIN_CODE_LINE_HEIGHT_UNITS = 0.175  # 42 px
 
 # Array cells sized so a 7-element array fills most of the safe width.
 CELL_SIDE = 0.52                        # 125 px per cell
@@ -78,8 +116,23 @@ CELL_BUFF = 0.06
 # code panel - present, but not readable on a phone.
 CAPTION_FONT_SIZE = 26
 CAPTION_CHARS_PER_LINE = 46
-CAPTION_MAX_LINES = 4
-CAPTION_MAX_HEIGHT = 1.05               # 252 px; keeps clear of the code band
+CAPTION_MAX_LINES = 5
+CAPTION_MAX_HEIGHT = 1.30               # 312 px
+
+# Vertical gap between composed bands. Small and constant: the point of
+# the composer is that leftover space goes to the CODE PANEL, not into
+# the gaps between elements.
+BAND_GAP = 0.14                         # 34 px
+
+# The code panel's height is a REMAINDER, not a constant. CODE_MAX_HEIGHT
+# survives only as the standalone default used when `code_panel` is
+# emitted without the composer (and by tests that exercise it alone).
+#
+# Root cause it replaces: with a fixed band the panel spanned -0.80..-3.30
+# no matter what was above it, so a one-line caption left ~255 px of
+# unreachable black on the canvas while the code stayed small. Measured
+# on a real frame: 0.54 units dead between the index row and the caption,
+# 0.52 units dead between the caption and the code panel.
 
 # Map/sequence panels grow DOWNWARD with their contents, unlike the
 # single-row array. Anchoring them at a fixed centre let a 3-entry map
@@ -170,10 +223,20 @@ def pointer_arrows(state: FrameState, array_var: str = "arr_group", var: str = "
                 f"_cell_{counter} = {array_var}[{index}]",
                 f"_lbl_{counter} = Text({_lit(name)}, font_size={POINTER_FONT_SIZE}, color=YELLOW)",
                 f"_lbl_{counter}.next_to(_cell_{counter}, UP, buff={offset:.2f})",
-                f"_arw_{counter} = Arrow(start=_lbl_{counter}.get_bottom(), "
-                f"end=_cell_{counter}.get_top(), buff=0.05, stroke_width=4, color=YELLOW)",
-                f"{var}.add(VGroup(_lbl_{counter}, _arw_{counter}))",
             ]
+            # Exactly one arrow per cell, drawn from the innermost label.
+            # An arrow per pointer would have to start above the stack and
+            # therefore pass THROUGH every label beneath it — at the
+            # convergence frame the shaft struck out the word "left". The
+            # pointers share a cell, so one arrow says the same thing.
+            if depth == 0:
+                lines += [
+                    f"_arw_{counter} = Arrow(start=_lbl_{counter}.get_bottom(), "
+                    f"end=_cell_{counter}.get_top(), buff=0.05, stroke_width=4, color=YELLOW)",
+                    f"{var}.add(VGroup(_lbl_{counter}, _arw_{counter}))",
+                ]
+            else:
+                lines.append(f"{var}.add(_lbl_{counter})")
             counter += 1
     return lines
 
@@ -194,6 +257,32 @@ def scalar_panel(state: FrameState, var: str = "vars_group") -> list[str]:
     ]
 
 
+def _dedent_window(lines: list[str]) -> list[str]:
+    """Drop the leading whitespace every visible line shares.
+
+    Java inside a method body starts three or four levels deep, so a
+    window can spend a quarter of its width on a margin that carries no
+    information. Because the panel is fitted to the safe WIDTH, that
+    margin is paid for in font size: removing it makes every glyph
+    larger, which is the cheapest readability win available on a phone.
+
+    Strictly presentation, and strictly the SHARED prefix — relative
+    indentation between the visible lines is preserved exactly, so the
+    block structure a learner reads is unchanged. No non-whitespace
+    character is ever removed, and `CodeState` keeps the untouched source
+    (the renderer may present the truth better; it may not alter it).
+    """
+    indents = [
+        len(text) - len(text.lstrip(" "))
+        for text in lines
+        if text.strip()
+    ]
+    common = min(indents) if indents else 0
+    if common == 0:
+        return list(lines)
+    return [text[common:] if text.strip() else text for text in lines]
+
+
 def code_panel(state: CodeState, var: str = "code_group") -> list[str]:
     """Source window with the executing line highlighted.
 
@@ -212,11 +301,12 @@ def code_panel(state: CodeState, var: str = "code_group") -> list[str]:
     if not state.lines:
         return [f"{var} = VGroup()"]
 
-    source = "\n".join(state.lines)
+    source = "\n".join(_dedent_window(state.lines))
     lines = [
         f"{var} = Code(code_string={_lit(source)}, language='java', "
         f"add_line_numbers=True, line_numbers_from={state.start_line}, "
         f"background='window', "
+        f"formatter_style={_lit(CODE_THEME)}, "
         f"paragraph_config={{'font_size': {CODE_FONT_SIZE}}})",
     ]
 
@@ -228,9 +318,12 @@ def code_panel(state: CodeState, var: str = "code_group") -> list[str]:
             f"_hl_idx = {offset}",
             f"if 0 <= _hl_idx < len({var}.code_lines):",
             f"    for _i, _ln in enumerate({var}.code_lines):",
-            f"        _ln.set_opacity(1.0 if _i == _hl_idx else 0.45)",
+            f"        _ln.set_opacity(1.0 if _i == _hl_idx else {CONTEXT_LINE_OPACITY})",
+            # A filled, brighter surround: the active line leads by its own
+            # emphasis rather than by the context being suppressed.
             f"    _hl = SurroundingRectangle({var}.code_lines[_hl_idx], "
-            f"color=YELLOW, stroke_width=2, buff=0.03)",
+            f"color=YELLOW, stroke_width=4, buff=0.045, "
+            f"fill_color=YELLOW, fill_opacity=0.12)",
             f"    {var} = VGroup({var}, _hl)",
         ]
 
@@ -250,6 +343,170 @@ def code_panel(state: CodeState, var: str = "code_group") -> list[str]:
         # Position last, after any regrouping, so the whole group lands in
         # its band rather than only the code mobject.
         f"{var}.move_to([0, {CODE_Y}, 0])",
+    ]
+    return lines
+
+
+# Manim's Code mobject is MONOSPACE, so once the panel is fitted to the
+# safe width its per-line height is fixed by the longest visible line:
+#
+#     line_height  ~=  CODE_LINE_ASPECT * SAFE_WIDTH / longest_line_chars
+#
+# CODE_LINE_ASPECT is calibrated from real renders and deliberately set to
+# the LOW end of what was measured (2.31 and 2.40 across two windows), so
+# the fitter under-estimates how much context fits. An over-estimate is
+# the dangerous direction: it grows the window, the composer then has to
+# scale the panel down to fit, and the text ends up below the floor the
+# growth was supposed to protect.
+CODE_LINE_ASPECT = 2.30
+CODE_GUTTER_CHARS = 4                   # the line-number column
+MAX_WINDOW_RADIUS = 8                   # 17 lines; beyond this a phone
+                                        # viewer is reading a wall of text
+CODE_HEIGHT_BUDGET = 2.60               # conservative composed height: the
+                                        # real region is 2.9-3.4 units
+                                        # depending on caption length
+
+
+def fit_window_radius(
+    location: SourceLocation,
+    source_files: dict[str, str],
+    minimum: int,
+    maximum: int = MAX_WINDOW_RADIUS,
+) -> int:
+    """How many lines of context this canvas can actually afford to show.
+
+    Section 7: visible line count is DERIVED from the available canvas,
+    not fixed. A window of short lines is height-bound and keeps the
+    minimum; a window of long lines is WIDTH-bound, so its text is small
+    whatever the radius, and the leftover vertical space is better spent
+    on context than left black.
+
+    It asks `build_code_state` for each candidate rather than modelling
+    the window itself. An earlier version reimplemented the centred
+    window and so ignored the enclosing-block preference — it "grew" a
+    9-line loop-body window into a 15-line one that dragged in the class
+    signature, and the text got SMALLER. The selector is the only thing
+    that knows what will be shown.
+
+    Purely a function of the source text's shape — no algorithm, no file
+    name, no step kind reaches this.
+    """
+    if location.file is None or location.file not in source_files:
+        return minimum
+
+    def estimate(radius: int) -> tuple[int, float]:
+        state = build_code_state(location, source_files, radius)
+        if not state.lines:
+            return 0, 0.0
+        # Estimate against what will actually be DRAWN, which is the
+        # dedented window — otherwise the shared margin is counted twice
+        # and the fitter under-reports how much context fits.
+        drawn = _dedent_window(state.lines)
+        widest = max((len(text) for text in drawn), default=1) + CODE_GUTTER_CHARS
+        return len(state.lines), CODE_LINE_ASPECT * SAFE_WIDTH / max(widest, 1)
+
+    # The size the text is ALREADY going to be. Where a single long source
+    # line has already pushed this window below the target, refusing to
+    # add context does not win that size back — it only leaves the space
+    # black. Growth is judged against whichever is lower, the target or
+    # what this window can actually achieve.
+    _, baseline = estimate(minimum)
+    if baseline < ABS_MIN_CODE_LINE_HEIGHT_UNITS:
+        # Already unreadable at the minimum window, so a source line is
+        # pathologically long. More context would only be more noise;
+        # that is a source problem, not a layout one.
+        return minimum
+    acceptable = min(MIN_CODE_LINE_HEIGHT_UNITS, baseline)
+
+    best = minimum
+    for radius in range(minimum, maximum + 1):
+        count, line_height = estimate(radius)
+        if count == 0:
+            break
+        # Never accept a window that makes the text SMALLER than it
+        # already was: one wider line entering the window costs every line.
+        if line_height < acceptable:
+            break
+        if count * line_height > CODE_HEIGHT_BUDGET:
+            break
+        # Even at the guaranteed floor these lines must fit the region.
+        # Without this the fitter could add context that the composer then
+        # has to shrink below the floor to fit — growth that costs
+        # readability is not growth.
+        if count * ABS_MIN_CODE_LINE_HEIGHT_UNITS > CODE_HEIGHT_BUDGET:
+            break
+        best = radius
+    return best
+
+
+def compose_vertical(
+    anchor_vars: list[str],
+    caption_var: str = "caption",
+    code_var: str | None = "code_group",
+) -> list[str]:
+    """Give the code panel every unit of vertical space nothing else needs.
+
+    The upper elements (title, scalar readout, array/map/sequence) keep
+    their fixed bands: their heights are content-bounded and they must not
+    drift between steps, or the array would appear to jump as the caption
+    changes length. Below them the layout becomes a REMAINDER:
+
+        caption  -> pulled up under the MEASURED bottom of the structure
+        code     -> fills what is left, down to the safe-area bottom
+
+    Emitted as Manim source because the heights are only known once the
+    mobjects exist; every value below is a numeric literal, so no data
+    reaches the generated program.
+
+    Generic by construction: it reads measured geometry, never a variable
+    name, an algorithm or a step kind. With no structure above it the
+    caption simply keeps its band, and with no code panel the caption is
+    centred in the space that remains.
+    """
+    lines: list[str] = []
+
+    # Where the composable region starts: under whatever the step drew
+    # above it, or at the caption's own band if it drew nothing.
+    if anchor_vars:
+        tops = ", ".join(f"{name}.get_bottom()[1]" for name in anchor_vars)
+        lines.append(f"_avail_top = min([{tops}]) - {BAND_GAP}")
+    else:
+        lines.append(f"_avail_top = {CAPTION_Y} + {CAPTION_MAX_HEIGHT / 2:.3f}")
+    lines.append(f"_avail_top = min(_avail_top, {SAFE_TOP})")
+
+    if code_var is None:
+        # No code this step: centre the caption in the whole remainder
+        # rather than leaving the lower half of the frame empty.
+        lines += [
+            f"{caption_var}.move_to([0, (_avail_top + {SAFE_BOTTOM}) / 2, 0])",
+        ]
+        return lines
+
+    lines += [
+        # Caption first: it is the smaller, less compressible element, and
+        # the code panel is what should absorb the slack.
+        f"{caption_var}.move_to("
+        f"[0, _avail_top - {caption_var}.height / 2, 0])",
+        f"_code_top = {caption_var}.get_bottom()[1] - {BAND_GAP}",
+        f"_code_h = _code_top - ({SAFE_BOTTOM})",
+        # Fill the safe width, then take the remaining height. Both are
+        # limits, not targets: a small window is scaled UP into the space,
+        # which is the whole point.
+        f"{code_var}.scale_to_fit_width({CODE_MAX_WIDTH})",
+        f"if {code_var}.height > _code_h and _code_h > 0:",
+        f"    {code_var}.scale_to_fit_height(_code_h)",
+        f"elif {code_var}.height < _code_h:",
+        # Growing to fill the height must not push the panel past the safe
+        # width, so re-clamp width after the height-driven scale-up.
+        f"    {code_var}.scale_to_fit_height(_code_h)",
+        f"    if {code_var}.width > {CODE_MAX_WIDTH}:",
+        f"        {code_var}.scale_to_fit_width({CODE_MAX_WIDTH})",
+        # Hang from the top of the region, directly under the explanation
+        # it belongs to. Centring was tried and rejected on a real frame:
+        # a width-bound panel that cannot fill the height then floats with
+        # black above AND below it, reading as two layout errors instead
+        # of one bottom margin.
+        f"{code_var}.move_to([0, _code_top - {code_var}.height / 2, 0])",
     ]
     return lines
 
