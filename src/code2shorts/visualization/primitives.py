@@ -82,8 +82,35 @@ CODE_THEME = "monokai"
 # lines must stay readable — they are what makes the active line make
 # sense — so the active line leads by highlight and weight, not by
 # everything else being hidden.
-CONTEXT_LINE_OPACITY = 0.78
-MIN_CONTEXT_LINE_OPACITY = 0.70   # readability floor, asserted by test
+CONTEXT_LINE_OPACITY = 0.92
+"""How far NON-executing lines are dimmed.
+
+0.45 was the original "surrounding code is too faint" defect; 0.78 fixed
+the worst of it; 0.92 is where Phase 6.4.2 settles. Focus must come from
+the ACTIVE line being emphasised, never from the rest being suppressed —
+a learner reads the lines around line 9 in order to understand why line 9
+matters, and the highlight now carries its own fill and border, so it
+leads without the context having to recede."""
+
+MIN_CONTEXT_LINE_OPACITY = 0.85   # readability floor, asserted by test
+
+PANEL_BACKGROUND = "#0D1117"
+"""The code panel's own ground.
+
+Measured on the real Phase 6.4 MP4: the panel rendered at luma 39 against
+a luma-0 canvas. That is Monokai's brown-grey, and it is what made the
+code look flat - every syntax colour was competing against a grey wash
+rather than sitting on black. #0D1117 measures luma 15: a true dark
+editor ground that still separates from the pure-black canvas."""
+
+PANEL_BORDER = "#30363D"
+"""A subtle edge so the panel reads as a surface rather than a hole.
+Deliberately dim: the border must never compete with the code."""
+
+LINE_NUMBER_COLOR = "#8B949E"
+"""Line numbers: clearly visible, deliberately secondary. Never brighter
+than the code, never so dim they disappear when a Short is watched at
+half size."""
 
 # The code panel is the primary teaching surface, so it gets the largest
 # band and is fitted to the safe WIDTH (not shrunk to fit leftover space).
@@ -308,6 +335,32 @@ def code_panel(state: CodeState, var: str = "code_group") -> list[str]:
         f"background='window', "
         f"formatter_style={_lit(CODE_THEME)}, "
         f"paragraph_config={{'font_size': {CODE_FONT_SIZE}}})",
+        # Manim paints the panel from the Pygments style's own background,
+        # which for monokai measured luma 39 against a luma-0 canvas.
+        # Repainting it to a true dark ground is what turns "readable"
+        # into "crisp": the syntax colours stop being washed toward grey.
+        # Repaint ONLY the panel body - the single largest rectangle.
+        # Recolouring every rectangle in the group turned the window's
+        # traffic-light dots into grey rings, which is a regression the
+        # first attempt shipped: the chrome is part of the visual
+        # identity and is not the thing that was washing out the code.
+        f"_rects = [_p for _p in {var} "
+        f"if isinstance(_p, RoundedRectangle | Rectangle)]",
+        f"if _rects:",
+        f"    _panel = max(_rects, key=lambda _p: _p.width * _p.height)",
+        # family=False is essential: Manim's set_fill/set_stroke recurse
+        # into submobjects by default, and the window's traffic-light dots
+        # live inside the panel rectangle. Without it they were repainted
+        # to the border colour - three grey rings where red, amber and
+        # green belong. Verified by sampling the pixels either side of the
+        # change.
+        f"    _panel.set_fill(color={_lit(PANEL_BACKGROUND)}, opacity=1.0, "
+        f"family=False)",
+        f"    _panel.set_stroke(color={_lit(PANEL_BORDER)}, width=2, opacity=1.0, "
+        f"family=False)",
+        # Line numbers: visible, secondary, never brighter than the code.
+        f"if getattr({var}, 'line_numbers', None) is not None:",
+        f"    {var}.line_numbers.set_color({_lit(LINE_NUMBER_COLOR)})",
     ]
 
     offset = state.highlight_offset
@@ -322,8 +375,8 @@ def code_panel(state: CodeState, var: str = "code_group") -> list[str]:
             # A filled, brighter surround: the active line leads by its own
             # emphasis rather than by the context being suppressed.
             f"    _hl = SurroundingRectangle({var}.code_lines[_hl_idx], "
-            f"color=YELLOW, stroke_width=4, buff=0.045, "
-            f"fill_color=YELLOW, fill_opacity=0.12)",
+            f"color=YELLOW, stroke_width=5, buff=0.05, "
+            f"fill_color=YELLOW, fill_opacity=0.16)",
             f"    {var} = VGroup({var}, _hl)",
         ]
 
