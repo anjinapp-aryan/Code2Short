@@ -256,6 +256,19 @@ class Settings(BaseSettings):
 
     tts_provider: str = "mock"
 
+    kokoro_voice: str = Field(
+        default="af_heart",
+        pattern=r"^[a-z]{2}_[a-z]+$",
+        description=(
+            "Kokoro narrator. Phase 6.3 selected af_heart by listening; "
+            "any other packaged voice (am_michael, bf_emma, ...) is "
+            "selectable by configuration alone. The pattern is a security "
+            "control as much as a typo guard: the value indexes the voice "
+            "pack and is never interpolated into a command line, and this "
+            "keeps it that way."
+        ),
+    )
+
     feature_ai_explanation_enabled: bool = True
     feature_rendering_enabled: bool = True
 

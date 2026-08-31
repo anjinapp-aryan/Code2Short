@@ -18,6 +18,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from code2shorts.narration.audio import AudioProcessingError, trim_edge_silence
 from code2shorts.execution.sandbox import ProcessResult, run_subprocess
 
 
@@ -179,10 +180,12 @@ class SapiTTSProvider(TTSProvider):
         voice: str | None = None,
         timeout_seconds: float = 120.0,
         run_subprocess_fn: Callable[..., ProcessResult] | None = None,
+        trim_silence: bool = True,
     ) -> None:
         self._voice = voice
         self._timeout_seconds = timeout_seconds
         self._run_subprocess_fn = run_subprocess_fn or run_subprocess
+        self._trim_silence = trim_silence
 
     @staticmethod
     def is_available() -> bool:
@@ -227,6 +230,19 @@ class SapiTTSProvider(TTSProvider):
             raise TTSFailure(f"SAPI synthesis failed: {result.stderr[-2000:]}")
         if not output_path.is_file() or output_path.stat().st_size == 0:
             raise TTSFailure("SAPI reported success but produced no audio")
+
+        # SAPI pads every utterance with roughly 0.10 s of leading and
+        # 0.76 s of trailing silence (measured across the Phase 6 track).
+        # Trim BEFORE measuring: that padding was being counted as speech,
+        # so the visual step was widened to hold it and the video gained a
+        # 1.2 s dead gap after every sentence. Trimming is best-effort -
+        # speech that exists but is untrimmed is far better than a failed
+        # run - but the duration is always measured from the real file.
+        if self._trim_silence:
+            try:
+                trim_edge_silence(output_path)
+            except (AudioProcessingError, OSError):
+                pass
 
         duration = self._measure_duration(output_path)
         checksum = hashlib.sha256(output_path.read_bytes()).hexdigest()

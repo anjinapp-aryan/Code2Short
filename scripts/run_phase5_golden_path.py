@@ -39,8 +39,28 @@ from code2shorts.artifacts import InMemoryArtifactStore  # noqa: E402
 from code2shorts.config import Settings  # noqa: E402
 from code2shorts.core.models import SupportedLanguage, TraceEventType  # noqa: E402
 from code2shorts.media import MediaComposer, probe_audio, probe_video  # noqa: E402
+from code2shorts.media.audio_forensics import (  # noqa: E402
+    measure_audio,
+    validate_audio_experience,
+)
+from code2shorts.media.composer import AUDIO_SAMPLE_RATE  # noqa: E402
 from code2shorts.media.validation import validate_final_video, validate_timeline  # noqa: E402
+from code2shorts.narration.audio import (  # noqa: E402
+    BREATH_SECONDS,
+    KEEP_EDGE_SILENCE_SECONDS,
+    TARGET_LUFS,
+    normalize_track,
+)
+from code2shorts.visualization.timing import (  # noqa: E402
+    FINAL_FADE_OUT_SECONDS,
+    STEP_FADE_IN_SECONDS,
+    STEP_FADE_OUT_SECONDS,
+    TITLE_FADE_IN_SECONDS,
+    TITLE_HOLD_SECONDS,
+)
 from code2shorts.narration import (  # noqa: E402
+    KokoroTTSProvider,
+    to_spoken,
     SapiTTSProvider,
     SyntheticTTSProvider,
     align_narration,
@@ -196,6 +216,17 @@ def main() -> int:
     # Free-tier models are slow: a full-trace explanation prompt routinely
     # exceeds the 30s default, so the golden path allows a longer budget.
     parser.add_argument("--timeout", type=float, default=180.0)
+    parser.add_argument(
+        "--tts",
+        default="kokoro",
+        choices=["kokoro", "sapi", "auto"],
+        help="speech engine; 'auto' prefers kokoro and falls back to sapi",
+    )
+    parser.add_argument(
+        "--voice",
+        default=None,
+        help="voice name for the chosen engine (default: the engine's own)",
+    )
     parser.add_argument("--output-dir", type=Path, default=Path("output/phase5"))
     args = parser.parse_args()
 
@@ -310,11 +341,22 @@ def main() -> int:
     print(f"plan producer: {plan_artifact.producer}")
 
     # --- speech, subtitles ------------------------------------------------
-    tts = SapiTTSProvider() if SapiTTSProvider.is_available() else SyntheticTTSProvider()
+    # Provider selection is EXPLICIT and recorded, never silent. A video
+    # whose voice changes halfway through is worse than one that is merely
+    # synthetic, so a requested engine that cannot run fails loudly unless
+    # the caller asked for automatic fallback.
+    tts = _build_tts(args)
+    print(
+        f"tts provider     : {type(tts).__name__} "
+        f"voice={getattr(tts, '_voice', None)}"
+    )
     started = time.perf_counter()
     audio = {}
     for segment in narration.segments:
-        r = tts.synthesize(segment.text, out / f"seg_{segment.order}")
+        # Speak the spoken form; subtitles keep `segment.text` exactly.
+        # Sent raw, "chars[0]" and "chars[6]" both synthesise as "chars"
+        # and the learner is told two different states are identical.
+        r = tts.synthesize(to_spoken(segment.text), out / f"seg_{segment.order}")
         audio[segment.order] = (r.audio_path, r.duration_seconds)
     timings["tts"] = time.perf_counter() - started
 
@@ -361,6 +403,11 @@ def main() -> int:
     # --- compose + validate ----------------------------------------------
     started = time.perf_counter()
     combined = _concat_audio(alignment, out / "narration.wav")
+    # Loudness-normalise the assembled track, not the individual segments:
+    # normalising each one separately would flatten the natural level
+    # differences between sentences and is what makes narration sound
+    # machine-levelled.
+    normalize_track(combined, sample_rate=AUDIO_SAMPLE_RATE)
     final = out / "final.mp4"
     MediaComposer(timeout_seconds=300.0).compose(
         Path(render.output_path), combined, final, video.duration_seconds)
@@ -374,6 +421,58 @@ def main() -> int:
           f"{final_video.duration_seconds:.2f}s | audio {final_audio.codec} "
           f"{final_audio.sample_rate}Hz {final_audio.duration_seconds:.2f}s")
     print(f"media validation : {'PASS' if report.passed else 'FAIL ' + str(report.errors)}")
+
+    # Independent forensics: ask FFmpeg what is really in the file rather
+    # than asking the pipeline whether it agrees with itself. The 22.1s
+    # silent tail passed every internal check.
+    forensics = measure_audio(final)
+    audio_experience = validate_audio_experience(
+        forensics,
+        video_duration_seconds=probe_video(final).duration_seconds,
+        # Every budget below is DERIVED from the pipeline's own timing
+        # constants, so it tracks the design instead of being tuned until
+        # the file passes.
+        #
+        # Tail: the last segment gets the same breath as every other, then
+        # the renderer's closing fade.
+        allowed_silent_tail_seconds=(
+            KEEP_EDGE_SILENCE_SECONDS + BREATH_SECONDS + FINAL_FADE_OUT_SECONDS
+        ),
+        # Between segments: two trimmed edges, the breath, and the
+        # cross-fade during which the picture is already changing.
+        max_internal_gap_seconds=(
+            2 * KEEP_EDGE_SILENCE_SECONDS
+            + BREATH_SECONDS
+            + STEP_FADE_OUT_SECONDS
+            + STEP_FADE_IN_SECONDS
+            + 0.15
+        ),
+        # The title card, which is silent because there is nothing to say
+        # until the first step is drawn.
+        allowed_lead_in_seconds=(
+            TITLE_FADE_IN_SECONDS + TITLE_HOLD_SECONDS + STEP_FADE_IN_SECONDS + 0.1
+        ),
+        # Silence the pipeline deliberately left: from the end of each
+        # segment's speech to the start of the next one's. That covers the
+        # breath, the cross-fade, and any step the plan declared longer
+        # than its narration needed - which the fitter keeps on purpose,
+        # because pacing is content and is never trimmed to save time.
+        designed_silence_intervals=_designed_silences(alignment),
+        target_lufs=TARGET_LUFS,
+        expected_sample_rate=AUDIO_SAMPLE_RATE,
+    )
+    print(
+        f"audio forensics  : {forensics.integrated_lufs} LUFS, "
+        f"peak {forensics.true_peak_dbtp} dBTP, "
+        f"{forensics.sample_rate} Hz x{forensics.channels}, "
+        f"silent tail {forensics.silent_tail_seconds:.2f}s"
+    )
+    print(
+        "audio experience : "
+        + ("PASS" if audio_experience.passed else "FAIL")
+    )
+    for error in audio_experience.errors:
+        print(f"    - {error}")
     print(f"timeline validate: {'PASS' if timeline.passed else 'FAIL ' + str(timeline.errors)}")
 
     # Per-node timing derived from the workflow event stream, which already
@@ -396,11 +495,58 @@ def main() -> int:
     # next to the MP4 rather than left in the workflow's memory.
     _persist(out, trace=trace, plan=plan, alignment=alignment,
              report=report, timeline=timeline, sync=sync, content=content,
-             distinct=distinct)
+             distinct=distinct, forensics=forensics,
+             audio_experience=audio_experience)
 
     print(f"\nfinal artifact: {final.resolve()}")
-    return 0 if (report.passed and timeline.passed) else 1
+    return 0 if (report.passed and timeline.passed and audio_experience.passed) else 1
 
+
+
+
+
+def _build_tts(args):
+    """Pick the speech engine explicitly.
+
+    Phase 6.2. Kokoro is a neural, offline, permissively licensed voice;
+    SAPI remains a working fallback. Selection never happens silently
+    mid-run: `--tts kokoro` fails outright if the model is missing, and
+    only `--tts auto` is allowed to substitute.
+    """
+    if args.tts in ("kokoro", "auto"):
+        # The voice comes from configuration, never from a literal here:
+        # CODE2SHORTS_KOKORO_VOICE overrides it without touching source.
+        voice = args.voice or Settings().kokoro_voice
+        kokoro = KokoroTTSProvider(voice=voice)
+        if kokoro.is_available():
+            return kokoro
+        if args.tts == "kokoro":
+            raise SystemExit(
+                "Kokoro was requested but is unavailable (model files or "
+                "onnxruntime/gruut missing). Re-run with --tts auto to fall "
+                "back to SAPI, or install the model."
+            )
+        print("  (kokoro unavailable, falling back to SAPI)")
+
+    if SapiTTSProvider.is_available():
+        return SapiTTSProvider(voice=args.voice or "Microsoft Zira Desktop")
+    return SyntheticTTSProvider()
+
+
+def _designed_silences(alignment) -> list[tuple[float, float]]:
+    """Intervals where the pipeline intended no speech.
+
+    Each runs from where a segment's measured audio ends to where the next
+    segment's audio begins. Anything the file goes quiet for outside these
+    is silence nobody asked for, which is the only kind worth reporting.
+    """
+    segments = sorted(alignment.segments, key=lambda s: s.start_seconds)
+    intervals: list[tuple[float, float]] = []
+    for current, following in zip(segments, segments[1:]):
+        speech_ends = current.start_seconds + (current.audio_duration_seconds or 0.0)
+        if following.start_seconds > speech_ends:
+            intervals.append((speech_ends, following.start_seconds))
+    return intervals
 
 
 def _persist(out: Path, **artifacts) -> None:

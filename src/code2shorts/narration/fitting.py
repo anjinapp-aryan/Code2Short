@@ -36,10 +36,17 @@ from __future__ import annotations
 from pydantic import BaseModel
 
 from code2shorts.ai.contracts import NarrationResponse, VisualizationPlanResponse
+from code2shorts.narration.audio import BREATH_SECONDS
 
-DEFAULT_PADDING_SECONDS = 0.35
+DEFAULT_PADDING_SECONDS = BREATH_SECONDS
 """Breathing room after speech ends so one segment does not butt straight
-into the next. Small and fixed — not a tuning knob for hiding overflow."""
+into the next. Small and fixed — not a tuning knob for hiding overflow.
+
+Phase 6.1: this is now the ONLY deliberate pause between segments, and it
+is shared with `narration.audio` so there is one number rather than two.
+Before the synthesiser's padding was trimmed, this 0.35 s sat on top of
+~0.86 s of TTS silence, and the measured gap after every sentence was
+1.21-1.24 s. Same intent, an accurate amount."""
 
 
 class FitAdjustment(BaseModel):

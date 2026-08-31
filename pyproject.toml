@@ -25,6 +25,26 @@ render = [
     # see docs/PHASE_4_1_REAL_RENDER.md for the one-line Windows setup.
     "imageio-ffmpeg>=0.5",
 ]
+neural-tts = [
+    # Phase 6.2. OPTIONAL: without it the pipeline still speaks, via the
+    # Windows SAPI provider. Both are permissively licensed, which is the
+    # whole reason this particular pair was chosen — every mainstream
+    # alternative (piper-tts, phonemizer, phonemizer-fork, misaki[en],
+    # g2p-en) reaches GPL, and Code2Shorts is MIT and publicly
+    # distributed.
+    #
+    #   onnxruntime  MIT       runs the Kokoro-82M graph
+    #   gruut        MIT       grapheme -> IPA
+    #   num2words    LGPL-2.1  gruut leaf; use does not force a relicence
+    #
+    # `kokoro-onnx` is deliberately NOT listed: its wrapper imports
+    # espeak-ng (GPL-3.0) at module load, so the ONNX graph is driven
+    # directly instead and the model's symbol table is vendored as data.
+    # The ~340 MB weights (Apache-2.0) are fetched separately into
+    # models/kokoro/ — see narration/tts_kokoro.py.
+    "onnxruntime>=1.20",
+    "gruut>=2.4",
+]
 
 [project.scripts]
 code2shorts = "code2shorts.cli:app"

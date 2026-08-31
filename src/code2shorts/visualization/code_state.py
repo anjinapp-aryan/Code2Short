@@ -215,11 +215,40 @@ def build_code_state(
             end = min(total, start + window_size - 1)
             start = max(1, end - window_size + 1)
     else:
-        # Center the window on the executing line, then clamp so a line near
-        # either end of the file still yields a full-size window.
+        # The block does not fit, so the window must be narrower than it.
+        # Centre on the executing line, but STAY INSIDE the block.
+        #
+        # Phase 6.4, measured: a blind centred window at `int left = 0;`
+        # (line 5) spanned lines 1-9, which pulled in the package
+        # declaration and the 54-character method signature. Because the
+        # panel is fitted to the safe width, the longest visible line sets
+        # the font for every line, so those two boilerplate lines shrank
+        # the code from 79 px per line to 44 px - a 1.8x reduction caused
+        # entirely by text the learner does not need to read.
+        #
+        # Clamping to the block's interior keeps the window on the code
+        # being executed. It is a purely structural rule: `enclosing_block`
+        # counts braces and knows nothing about methods or algorithms.
         start = max(1, location.line - window_radius)
         end = min(total, start + window_size - 1)
         start = max(1, end - window_size + 1)
+        if block is not None:
+            interior_start, interior_end = block[0] + 1, block[1] - 1
+            # Only clamp when the executing line is INSIDE the interior.
+            # The active line can be the block's own opening line - a
+            # METHOD_ENTER event highlights the signature - and clamping
+            # then pushes the window past it. The regression test
+            # `test_real_trace_line_mapping_holds_to_the_displayed_label`
+            # caught exactly that on remove_duplicates: the window started
+            # at line 5 while line 4 was highlighted, so the panel showed
+            # no highlight at all. Keeping the executing line visible
+            # outranks every readability gain.
+            if (
+                interior_start <= location.line <= interior_end
+                and interior_end - interior_start + 1 >= window_size
+            ):
+                start = min(max(start, interior_start), interior_end - window_size + 1)
+                end = start + window_size - 1
 
     lines, start_line = _trim_blank_edges(
         all_lines[start - 1 : end], start, location.line

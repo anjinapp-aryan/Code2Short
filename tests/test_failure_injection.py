@@ -34,6 +34,7 @@ from code2shorts.media.validation import (
     validate_timeline,
     validate_video_file,
 )
+from code2shorts.visualization.timing import total_video_seconds
 from code2shorts.narration import SyntheticTTSProvider, TTSFailure, align_narration
 from code2shorts.narration.alignment import AlignmentError
 from code2shorts.visualization import (
@@ -121,8 +122,15 @@ def test_narration_overflow_is_reported_and_timeline_unchanged() -> None:
         narration, _plan([0], durations=[1.0]), audio_by_segment={0: ("a.wav", 30.0)}
     )
     assert alignment.overflow_count == 1
-    assert alignment.total_duration_seconds == 1.0  # NOT stretched to 30s
-    result = validate_timeline(alignment, video_duration_seconds=1.0)
+    # The STEP is not stretched to hold 30 s of audio; the total is that
+    # one-second step plus the renderer's own animation, nothing more.
+    assert alignment.segments[0].duration_seconds == pytest.approx(1.0)
+    assert alignment.total_duration_seconds == pytest.approx(
+        total_video_seconds(_plan([0], durations=[1.0]))
+    )
+    result = validate_timeline(
+        alignment, video_duration_seconds=alignment.total_duration_seconds
+    )
     assert not result.passed
     assert any("NOT altered" in e for e in result.errors)
 

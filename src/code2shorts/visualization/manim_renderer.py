@@ -24,6 +24,13 @@ from code2shorts.ai.contracts import VisualizationPlanResponse
 from code2shorts.execution.sandbox import ProcessResult, run_subprocess
 from code2shorts.core.models import SourceLocation
 from code2shorts.media.probe import VideoProbeError, probe_video
+from code2shorts.visualization.timing import (
+    FINAL_FADE_OUT_SECONDS,
+    STEP_FADE_IN_SECONDS,
+    STEP_FADE_OUT_SECONDS,
+    TITLE_FADE_IN_SECONDS,
+    TITLE_HOLD_SECONDS,
+)
 from code2shorts.visualization.code_state import (
     DEFAULT_WINDOW_RADIUS,
     build_code_state,
@@ -95,8 +102,8 @@ def build_scene_source(
 
     body: list[str] = []
     body += title_text(plan.lesson_title)
-    body += ["self.play(FadeIn(title))"]
-    body += ["self.wait(0.4)"]
+    body += [f"self.play(FadeIn(title), run_time={TITLE_FADE_IN_SECONDS})"]
+    body += [f"self.wait({TITLE_HOLD_SECONDS})"]
 
     previous_groups: list[str] = []
     for step in plan.steps:
@@ -164,10 +171,10 @@ def build_scene_source(
         # this is what stops elements overlapping as the video progresses.
         if previous_groups:
             fade_out = ", ".join(f"FadeOut({name})" for name in previous_groups)
-            step_body.insert(0, f"self.play({fade_out}, run_time=0.25)")
+            step_body.insert(0, f"self.play({fade_out}, run_time={STEP_FADE_OUT_SECONDS})")
 
         fade_in = ", ".join(f"FadeIn({name})" for name in groups)
-        step_body.append(f"self.play({fade_in}, run_time=0.4)")
+        step_body.append(f"self.play({fade_in}, run_time={STEP_FADE_IN_SECONDS})")
         step_body.append(f"self.wait({float(step.duration_seconds)})")
 
         body += step_body
@@ -175,7 +182,7 @@ def build_scene_source(
 
     if previous_groups:
         fade_out = ", ".join(f"FadeOut({name})" for name in previous_groups)
-        body.append(f"self.play({fade_out}, run_time=0.3)")
+        body.append(f"self.play({fade_out}, run_time={FINAL_FADE_OUT_SECONDS})")
 
     indented = "\n".join(f"        {line}" for line in body)
     return "\n".join(
