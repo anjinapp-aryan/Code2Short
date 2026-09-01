@@ -116,6 +116,42 @@ half size."""
 # band and is fitted to the safe WIDTH (not shrunk to fit leftover space).
 CODE_MAX_WIDTH = SAFE_WIDTH             # 4.14 units = 994 px
 CODE_MAX_HEIGHT = 2.50                  # 600 px
+
+REPRESENTATIVE_PERCENTILE = 0.80
+"""Which line width the panel is sized for.
+
+The 80th percentile of visible line widths: wide enough to fit real Java
+statements at full size, low enough that a single outlier cannot drag it.
+A median was tried first and failed - windows are full of trivially short
+lines (`}`, `{`) which pull a median far below any real statement, so
+nearly every line was then treated as an outlier."""
+
+LONG_LINE_RATIO = 1.30
+"""How much wider than the median line before a line is an OUTLIER.
+
+Measured against the median rather than the mean, so the outlier being
+detected cannot drag its own threshold. Ordinary variation between Java
+statements sits well inside 1.30; only a genuine outlier trips it."""
+
+PANEL_PAD_X = 0.16
+PANEL_PAD_Y = 0.14
+PANEL_CHROME_HEIGHT = 0.20
+"""Height of the strip the window's traffic lights sit in. Manim's
+own panel reserved this implicitly; stated here because this module
+now draws the panel, and without it the dots land on line one."""
+"""Padding between the code and the panel edge. Previously implicit in
+Manim's own SurroundingRectangle; stated here because the panel is now
+drawn by this module."""
+
+MIN_OUTLIER_SCALE = 0.55
+"""Floor for shrinking a NON-active outlier. Past this it stops being
+readable context and may as well not be shown, so the panel accepts a
+little overflow instead."""
+
+MIN_ACTIVE_OUTLIER_SCALE = 0.82
+"""Floor for the ACTIVE line when it is itself the outlier. The line being
+taught may give up a little size; it may not give up legibility, so it is
+allowed to overflow the content box rather than shrink further."""
 MIN_CODE_LINE_HEIGHT_UNITS = 0.20       # 48 px per line — GROWTH TARGET:
                                         # the window fitter will not add a
                                         # line that pushes below this.
@@ -313,91 +349,150 @@ def _dedent_window(lines: list[str]) -> list[str]:
 def code_panel(state: CodeState, var: str = "code_group") -> list[str]:
     """Source window with the executing line highlighted.
 
-    Built on Manim's `Code` mobject (the reason no third-party
-    code-highlighting package was adopted — see docs/OPEN_SOURCE_REUSE.md):
-    `code_lines` gives per-line access and `line_numbers_from` lets a
-    WINDOW keep the file's true line numbers, so a window over lines 38-46
-    is labelled 38-46 rather than 1-9.
+    Manim's `Code` mobject is used as the SYNTAX HIGHLIGHTER (the reason no
+    third-party highlighting package was adopted - see
+    docs/OPEN_SOURCE_REUSE.md): `code_lines` gives per-line access with
+    colours already applied, and `line_numbers_from` lets a WINDOW keep the
+    file's true line numbers, so a window over lines 38-46 is labelled
+    38-46 rather than 1-9.
 
-    The highlight both boxes the executing line and dims the rest. The
-    dimming technique is adapted in DESIGN ONLY from code-video-generator's
-    `HighlightLines` (Apache-2.0); none of its code is used, because it
-    targets Manim ~0.10 attributes (`.code`, `.line_no_from`) that do not
-    exist in the 0.21 we run — verified, see the Phase 4.3 reuse audit.
+    What is NOT used is its geometry. `Code` wraps its content in a
+    `SurroundingRectangle` sized from the longest line, and that rectangle
+    is the widest thing in the group, so `scale_to_fit_width` was really
+    fitting the longest line - every other line shrank with it. Measured
+    on the real palindrome plan: 3 of 31 frames rendered at ~24.6 px per
+    line against ~37-40 for the rest, purely because their window held one
+    54-character line. Halving that line changed the group width not at
+    all, which is what proved the rectangle was the cause.
+
+    So the panel is drawn here instead, sized from the REPRESENTATIVE line
+    width - the widest line that is not an outlier. An outlier is then
+    scaled down on its own, uniformly and about its left edge, so
+    monospace stays monospace and indentation still starts where it did.
+
+    The highlight both boxes the executing line and keeps the rest fully
+    readable. The dimming technique is adapted in DESIGN ONLY from
+    code-video-generator's `HighlightLines` (Apache-2.0); none of its code
+    is used, because it targets Manim ~0.10 attributes (`.code`,
+    `.line_no_from`) that do not exist in the 0.21 we run - verified, see
+    the Phase 4.3 reuse audit.
     """
     if not state.lines:
         return [f"{var} = VGroup()"]
 
     source = "\n".join(_dedent_window(state.lines))
+    offset = state.highlight_offset
+
     lines = [
-        f"{var} = Code(code_string={_lit(source)}, language='java', "
+        # Built purely for its highlighting; its rectangle is discarded.
+        f"_src = Code(code_string={_lit(source)}, language='java', "
         f"add_line_numbers=True, line_numbers_from={state.start_line}, "
         f"background='window', "
         f"formatter_style={_lit(CODE_THEME)}, "
         f"paragraph_config={{'font_size': {CODE_FONT_SIZE}}})",
-        # Manim paints the panel from the Pygments style's own background,
-        # which for monokai measured luma 39 against a luma-0 canvas.
-        # Repainting it to a true dark ground is what turns "readable"
-        # into "crisp": the syntax colours stop being washed toward grey.
-        # Repaint ONLY the panel body - the single largest rectangle.
-        # Recolouring every rectangle in the group turned the window's
-        # traffic-light dots into grey rings, which is a regression the
-        # first attempt shipped: the chrome is part of the visual
-        # identity and is not the thing that was washing out the code.
-        f"_rects = [_p for _p in {var} "
-        f"if isinstance(_p, RoundedRectangle | Rectangle)]",
-        f"if _rects:",
-        f"    _panel = max(_rects, key=lambda _p: _p.width * _p.height)",
-        # family=False is essential: Manim's set_fill/set_stroke recurse
-        # into submobjects by default, and the window's traffic-light dots
-        # live inside the panel rectangle. Without it they were repainted
-        # to the border colour - three grey rings where red, amber and
-        # green belong. Verified by sampling the pixels either side of the
-        # change.
-        f"    _panel.set_fill(color={_lit(PANEL_BACKGROUND)}, opacity=1.0, "
-        f"family=False)",
-        f"    _panel.set_stroke(color={_lit(PANEL_BORDER)}, width=2, opacity=1.0, "
-        f"family=False)",
-        # Line numbers: visible, secondary, never brighter than the code.
-        f"if getattr({var}, 'line_numbers', None) is not None:",
-        f"    {var}.line_numbers.set_color({_lit(LINE_NUMBER_COLOR)})",
+        "_code_lines = list(_src.code_lines)",
+        "_numbers = _src.line_numbers",
+        f"_numbers.set_color({_lit(LINE_NUMBER_COLOR)})",
+        # Keep the ORIGINAL relative layout of numbers and code: vertical
+        # pitch and number alignment are Phase 6.4.2 behaviour and are not
+        # what this phase is changing.
+        "_body = VGroup(_numbers, _src.code_lines)",
+        "",
+        # --- representative width, not maximum width --------------------
+        "_widths = sorted(_l.width for _l in _code_lines if _l.width > 0)",
+        # A HIGH PERCENTILE, not the median. Java windows are full of
+        # trivially short lines - a lone `}`, a `{` - and a median over
+        # those lands far below any real statement, which made almost
+        # every line look like an outlier. The 80th percentile tracks the
+        # width of genuine statements, so only a true outlier exceeds it.
+        f"_rep = _widths[min(len(_widths) - 1, int(len(_widths) * "
+        f"{REPRESENTATIVE_PERCENTILE}))] if _widths else 0.0",
+        # ...and never let one enormous line make even the percentile
+        # unreasonable: cap it against the widest ordinary line.
+        f"_rep = min(_rep, _widths[-1])",
+        # The body's representative extent runs from the left of the number
+        # column to the right edge a representative line would reach.
+        "_left_x = _body.get_left()[0]",
+        "_code_left_x = min("
+        "(_l.get_left()[0] for _l in _code_lines if _l.width > 0), "
+        "default=_left_x)",
+        "_rep_body = max((_code_left_x + _rep) - _left_x, 1e-6)",
+        "",
+        # --- scale from the representative width -------------------------
+        f"_content_w = {CODE_MAX_WIDTH} - 2 * {PANEL_PAD_X}",
+        "_body.scale(_content_w / _rep_body, about_point=_body.get_left())",
+        "",
+        # --- outliers shrink individually, never the whole block ---------
+        "_limit = _code_left_x = min("
+        "(_l.get_left()[0] for _l in _code_lines if _l.width > 0), "
+        "default=_body.get_left()[0])",
+        "_right_limit = _body.get_left()[0] + _content_w",
+        "for _i, _l in enumerate(_code_lines):",
+        "    _over = _l.get_right()[0] - _right_limit",
+        "    if _over > 0 and _l.width > 0:",
+        "        _factor = 1.0 - _over / _l.width",
+    ]
+    if offset is not None:
+        lines += [
+            f"        _floor = ({MIN_ACTIVE_OUTLIER_SCALE} if _i == {offset} "
+            f"else {MIN_OUTLIER_SCALE})",
+        ]
+    else:
+        lines += [f"        _floor = {MIN_OUTLIER_SCALE}"]
+    lines += [
+        "        _l.scale(max(_factor, _floor), about_edge=LEFT)",
+        "",
     ]
 
-    offset = state.highlight_offset
     if offset is not None:
-        # Guard inside the GENERATED source too — belt and braces against a
-        # window/line mismatch ever producing an IndexError mid-render.
         lines += [
             f"_hl_idx = {offset}",
-            f"if 0 <= _hl_idx < len({var}.code_lines):",
-            f"    for _i, _ln in enumerate({var}.code_lines):",
+            "if 0 <= _hl_idx < len(_code_lines):",
+            "    for _i, _ln in enumerate(_code_lines):",
             f"        _ln.set_opacity(1.0 if _i == _hl_idx else {CONTEXT_LINE_OPACITY})",
-            # A filled, brighter surround: the active line leads by its own
-            # emphasis rather than by the context being suppressed.
-            f"    _hl = SurroundingRectangle({var}.code_lines[_hl_idx], "
-            f"color=YELLOW, stroke_width=5, buff=0.05, "
-            f"fill_color=YELLOW, fill_opacity=0.16)",
-            f"    {var} = VGroup({var}, _hl)",
+            # The active line leads by its own emphasis, never by the
+            # context being suppressed.
+            "    _hl = SurroundingRectangle(_code_lines[_hl_idx], "
+            "color=YELLOW, stroke_width=5, buff=0.05, "
+            "fill_color=YELLOW, fill_opacity=0.16)",
+            "else:",
+            "    _hl = VGroup()",
         ]
+    else:
+        lines += ["_hl = VGroup()"]
 
     lines += [
-        # Phase 6.1: FILL the safe width rather than merely capping it.
-        # Previously the panel was only ever shrunk, so a short snippet
-        # stayed small and the code was the least readable thing on screen
-        # — the opposite of what a code-teaching video needs. Scaling up to
-        # the safe width makes the code the largest element by default.
-        f"{var}.scale_to_fit_width({CODE_MAX_WIDTH})",
-        # Height is the hard constraint: a tall window would otherwise grow
-        # up through the caption band. Shrinking here can push the panel
-        # below the readability floor, which means the WINDOW was too tall
-        # — that is handled upstream by narrowing the source window, not by
-        # letting the text become unreadable.
-        f"if {var}.height > {CODE_MAX_HEIGHT}: {var}.scale_to_fit_height({CODE_MAX_HEIGHT})",
-        # Position last, after any regrouping, so the whole group lands in
-        # its band rather than only the code mobject.
+        "",
+        # --- the panel, drawn from the CONTENT box ------------------------
+        # Width is the safe width by construction, so `compose_vertical`'s
+        # own width fit is a no-op and the composer is untouched.
+        f"_panel_w = {CODE_MAX_WIDTH}",
+        # Room for the chrome strip the traffic lights sit in, so they
+        # never overlap the first line of code.
+        f"_panel_h = _body.height + 2 * {PANEL_PAD_Y} + {PANEL_CHROME_HEIGHT}",
+        "_panel = RoundedRectangle(width=_panel_w, height=_panel_h, "
+        "corner_radius=0.08)",
+        f"_panel.set_fill(color={_lit(PANEL_BACKGROUND)}, opacity=1.0)",
+        f"_panel.set_stroke(color={_lit(PANEL_BORDER)}, width=2, opacity=1.0)",
+        # Panel centred so the BODY sits below the chrome strip.
+        f"_panel.move_to(_body.get_center() + UP * {PANEL_CHROME_HEIGHT} / 2)",
+        # The window's traffic lights. Manim drew these inside the
+        # rectangle this panel replaces, and losing them would change the
+        # accepted Phase 6.4.2 look for no reason - they are part of the
+        # visual identity, not part of the sizing problem.
+        "_dots = VGroup(*("
+        "Dot(radius=0.045, color=_c) for _c in ('#FF5F56', '#FFBD2E', '#27C93F')))",
+        "_dots.arrange(RIGHT, buff=0.055)",
+        f"_dots.next_to(_panel.get_corner(UL), DR, buff={PANEL_PAD_X * 0.9})",
+        f"{var} = VGroup(_panel, _dots, _body, _hl)",
+        # Height remains the one hard constraint: a window taller than its
+        # band still shrinks, exactly as before.
+        f"if {var}.height > {CODE_MAX_HEIGHT}: "
+        f"{var}.scale_to_fit_height({CODE_MAX_HEIGHT})",
         f"{var}.move_to([0, {CODE_Y}, 0])",
     ]
     return lines
+
 
 
 # Manim's Code mobject is MONOSPACE, so once the panel is fitted to the
