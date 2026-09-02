@@ -117,6 +117,26 @@ half size."""
 CODE_MAX_WIDTH = SAFE_WIDTH             # 4.14 units = 994 px
 CODE_MAX_HEIGHT = 2.50                  # 600 px
 
+CODE_VIEWPORT_WIDTH = CODE_MAX_WIDTH    # 4.14 units = 994 px, CONSTANT
+CODE_VIEWPORT_CENTER_X = 0.0
+"""The code panel is a FIXED VIEWPORT, not a box around its content.
+
+Phase 6.5.1 drew the panel from the body it happened to contain, so its
+width was decided by the window: measured across the 31 frames of a real
+plan the panel ranged from 513 px to 994 px wide and its centre drifted
+5.7 px off axis. A learner therefore saw the code area change shape from
+step to step, and on the widest windows the line-number column was pushed
+73 px OUTSIDE the panel's own left border.
+
+The width and the horizontal centre are stated here and the content is
+fitted inside them. Nothing about the window - its longest line, its line
+count, its indentation, its active line - can move them.
+
+The viewport HEIGHT is deliberately NOT a constant: the vertical region
+is whatever the caption leaves, and reserving a fixed share of it costs
+either code size or caption size. Measured, and reported rather than
+silently chosen - see the Phase 6.5.3 report."""
+
 REPRESENTATIVE_PERCENTILE = 0.80
 """Which line width the panel is sized for.
 
@@ -444,6 +464,32 @@ def code_panel(state: CodeState, var: str = "code_group") -> list[str]:
         "",
     ]
 
+    # --- pin the body to the viewport, THEN contain it -------------------
+    # Order matters: the highlight is built after this, because containment
+    # can still resize the very line it boxes.
+    lines += [
+        f"_view_left = {CODE_VIEWPORT_CENTER_X} - {CODE_VIEWPORT_WIDTH} / 2",
+        f"_view_right = {CODE_VIEWPORT_CENTER_X} + {CODE_VIEWPORT_WIDTH} / 2",
+        # The body starts at the viewport's own left padding rather than
+        # wherever the scaling left it, so the line-number column has a
+        # fixed internal margin and cannot reach the border.
+        f"_body.shift(RIGHT * ((_view_left + {PANEL_PAD_X}) - _body.get_left()[0]))",
+        "",
+        # --- hard containment: nothing crosses the right padding ---------
+        # The floors above are a READABILITY preference; this is the
+        # BOUNDARY. A line still over the edge after being floored is
+        # scaled to exactly fit, because a statement running off the panel
+        # into the black canvas is worse than a slightly smaller one.
+        # Measured on the real plan this binds on one frame of 31 - the
+        # 53-character method signature, over by 73 px = 7%.
+        f"_inner_right = _view_right - {PANEL_PAD_X}",
+        "for _l in _code_lines:",
+        "    _over = _l.get_right()[0] - _inner_right",
+        "    if _over > 0 and _l.width > 0:",
+        "        _l.scale(1.0 - _over / _l.width, about_edge=LEFT)",
+        "",
+    ]
+
     if offset is not None:
         lines += [
             f"_hl_idx = {offset}",
@@ -463,10 +509,10 @@ def code_panel(state: CodeState, var: str = "code_group") -> list[str]:
 
     lines += [
         "",
-        # --- the panel, drawn from the CONTENT box ------------------------
-        # Width is the safe width by construction, so `compose_vertical`'s
-        # own width fit is a no-op and the composer is untouched.
-        f"_panel_w = {CODE_MAX_WIDTH}",
+        # --- the panel IS the viewport ------------------------------------
+        # Width and horizontal centre are constants; only the height still
+        # follows the content.
+        f"_panel_w = {CODE_VIEWPORT_WIDTH}",
         # Room for the chrome strip the traffic lights sit in, so they
         # never overlap the first line of code.
         f"_panel_h = _body.height + 2 * {PANEL_PAD_Y} + {PANEL_CHROME_HEIGHT}",
@@ -474,8 +520,11 @@ def code_panel(state: CodeState, var: str = "code_group") -> list[str]:
         "corner_radius=0.08)",
         f"_panel.set_fill(color={_lit(PANEL_BACKGROUND)}, opacity=1.0)",
         f"_panel.set_stroke(color={_lit(PANEL_BORDER)}, width=2, opacity=1.0)",
-        # Panel centred so the BODY sits below the chrome strip.
-        f"_panel.move_to(_body.get_center() + UP * {PANEL_CHROME_HEIGHT} / 2)",
+        # Centred on the FIXED axis, not on the body. Centring it on the
+        # body is what let a wide window carry the panel sideways and push
+        # the line numbers out of it.
+        f"_panel.move_to([{CODE_VIEWPORT_CENTER_X}, "
+        f"_body.get_center()[1] + {PANEL_CHROME_HEIGHT} / 2, 0])",
         # The window's traffic lights. Manim drew these inside the
         # rectangle this panel replaces, and losing them would change the
         # accepted Phase 6.4.2 look for no reason - they are part of the
@@ -484,14 +533,49 @@ def code_panel(state: CodeState, var: str = "code_group") -> list[str]:
         "Dot(radius=0.045, color=_c) for _c in ('#FF5F56', '#FFBD2E', '#27C93F')))",
         "_dots.arrange(RIGHT, buff=0.055)",
         f"_dots.next_to(_panel.get_corner(UL), DR, buff={PANEL_PAD_X * 0.9})",
+        # Submobject ORDER is a contract: `repin_viewport` restores the
+        # invariant after a uniform scale and addresses these by index.
         f"{var} = VGroup(_panel, _dots, _body, _hl)",
-        # Height remains the one hard constraint: a window taller than its
-        # band still shrinks, exactly as before.
-        f"if {var}.height > {CODE_MAX_HEIGHT}: "
-        f"{var}.scale_to_fit_height({CODE_MAX_HEIGHT})",
-        f"{var}.move_to([0, {CODE_Y}, 0])",
+        # NO height cap here. Phase 6.5.1 capped the group at
+        # CODE_MAX_HEIGHT and relied on `compose_vertical` scaling it back
+        # UP to the safe width afterwards. That scale-up is gone: the panel
+        # is now born at the safe width, so a cap here could never be
+        # recovered and simply shrank the code - measured, 50.4 px per line
+        # became 38.8. The real height limit is the region the caption
+        # leaves, which only `compose_vertical` can measure.
     ]
+    lines += repin_viewport(var)
+    lines += [f"{var}.move_to([{CODE_VIEWPORT_CENTER_X}, {CODE_Y}, 0])"]
     return lines
+
+
+def repin_viewport(var: str) -> list[str]:
+    """Restore the FIXED viewport after a uniform scale, as Manim source.
+
+    A uniform `scale_to_fit_height` shrinks the panel along with the code,
+    which is exactly how a tall window ended up in a 513 px-wide panel.
+    The CONTENT is allowed to shrink - it is the thing that adapts - but
+    the viewport is not, so the panel is stretched back to its stated width
+    and the content re-pinned to the internal left margin.
+
+    Shared by `code_panel` and `compose_vertical` so the invariant has one
+    definition rather than two that can drift apart. Addresses the group's
+    submobjects by index, which is a contract `code_panel` states where it
+    builds them.
+    """
+    return [
+        f"_p = {var}.submobjects[0]",
+        f"_p.stretch_to_fit_width({CODE_VIEWPORT_WIDTH})",
+        f"_p.move_to([{CODE_VIEWPORT_CENTER_X}, _p.get_center()[1], 0])",
+        f"_dx = (_p.get_left()[0] + {PANEL_PAD_X}) "
+        f"- {var}.submobjects[2].get_left()[0]",
+        f"for _m in ({var}.submobjects[2], {var}.submobjects[3]):",
+        "    _m.shift(RIGHT * _dx)",
+        # The chrome is placed FROM the panel, so it is re-placed, not
+        # shifted - the stretch moved the corner it hangs off.
+        f"{var}.submobjects[1].next_to(_p.get_corner(UL), DR, "
+        f"buff={PANEL_PAD_X * 0.9})",
+    ]
 
 
 
@@ -640,7 +724,7 @@ def compose_vertical(
         # Fill the safe width, then take the remaining height. Both are
         # limits, not targets: a small window is scaled UP into the space,
         # which is the whole point.
-        f"{code_var}.scale_to_fit_width({CODE_MAX_WIDTH})",
+        f"{code_var}.scale_to_fit_width({CODE_VIEWPORT_WIDTH})",
         f"if {code_var}.height > _code_h and _code_h > 0:",
         f"    {code_var}.scale_to_fit_height(_code_h)",
         f"elif {code_var}.height < _code_h:",
@@ -656,6 +740,11 @@ def compose_vertical(
         # of one bottom margin.
         f"{code_var}.move_to([0, _code_top - {code_var}.height / 2, 0])",
     ]
+    # Every scale above is UNIFORM, so each one shrank the viewport along
+    # with its contents - the measured cause of a 513 px panel on a tall
+    # window. The content keeps whatever size the region allowed; the
+    # viewport is put back.
+    lines += repin_viewport(code_var)
     return lines
 
 

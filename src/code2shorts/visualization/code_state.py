@@ -157,6 +157,27 @@ def enclosing_block(lines: list[str], line: int) -> tuple[int, int] | None:
     return None
 
 
+
+def _first_nested_block_line(all_lines: list[str]) -> int | None:
+    """1-based line of the first INDENTED block opener, or None.
+
+    In a Java class file the first block opener at column 0 is the class
+    itself; the first one that is indented is the first method. Anchoring
+    an introduction window there skips the package declaration and the
+    class header without knowing what either of those things is.
+
+    Returns None when the shape is unexpected, so the caller keeps its
+    previous behaviour rather than guessing.
+    """
+    for index, text in enumerate(all_lines):
+        stripped = text.strip()
+        if not stripped or not stripped.endswith("{"):
+            continue
+        if len(text) - len(text.lstrip(" ")) > 0:
+            return index + 1
+    return None
+
+
 def build_code_state(
     location: SourceLocation,
     source_files: dict[str, str],
@@ -181,15 +202,43 @@ def build_code_state(
         return CodeState(file=location.file, total_lines=0)
 
     window_size = window_radius * 2 + 1
+    if location.line is None:
+        # The introduction window is deliberately NOT widened by the
+        # fitter. Given no executing line the fitter grew this to 14 lines,
+        # and a window that tall mixes long signatures with short braces,
+        # so the representative-width sizing produced a very wide spread of
+        # per-line sizes. Fewer lines, more evenly sized, reads better as
+        # an establishing shot.
+        window_size = DEFAULT_WINDOW_RADIUS * 2 + 1
     if location.line is None or total <= window_size:
-        lines, start_line = _trim_blank_edges(all_lines, 1, location.line)
+        start = 1
+        truncated = False
+        if location.line is None and total > window_size:
+            # The INTRODUCTION step cites no source line, so this used to
+            # fall through to "show the whole file" - all 24 lines of a
+            # real fixture. A window that tall is bound by HEIGHT
+            # rather than width, so the panel shrank to fit the band and
+            # the opening frame carried the smallest text in the video,
+            # most of it package/class/main boilerplate.
+            #
+            # With no executing line to centre on, the algorithm itself is
+            # the subject, so the window opens at the first block that is
+            # nested inside something else - in Java that is the first
+            # method, never the package line or the class declaration.
+            # Purely structural: it reads indentation and braces, and
+            # knows nothing about methods, algorithms or line numbers.
+            start = _first_nested_block_line(all_lines) or 1
+            truncated = start > 1 or total > window_size
+        window = all_lines[start - 1 : start + window_size - 1] \
+            if (location.line is None and total > window_size) else all_lines
+        lines, start_line = _trim_blank_edges(window, start, location.line)
         return CodeState(
             file=location.file,
             lines=lines,
             start_line=start_line,
             highlight_line=location.line,
             total_lines=total,
-            truncated=False,
+            truncated=truncated,
         )
 
     # Prefer the enclosing block when it fits: following execution inside
