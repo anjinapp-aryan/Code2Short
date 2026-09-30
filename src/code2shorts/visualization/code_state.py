@@ -157,6 +157,27 @@ def enclosing_block(lines: list[str], line: int) -> tuple[int, int] | None:
     return None
 
 
+
+def _first_nested_block_line(all_lines: list[str]) -> int | None:
+    """1-based line of the first INDENTED block opener, or None.
+
+    In a Java class file the first block opener at column 0 is the class
+    itself; the first one that is indented is the first method. Anchoring
+    an introduction window there skips the package declaration and the
+    class header without knowing what either of those things is.
+
+    Returns None when the shape is unexpected, so the caller keeps its
+    previous behaviour rather than guessing.
+    """
+    for index, text in enumerate(all_lines):
+        stripped = text.strip()
+        if not stripped or not stripped.endswith("{"):
+            continue
+        if len(text) - len(text.lstrip(" ")) > 0:
+            return index + 1
+    return None
+
+
 def build_code_state(
     location: SourceLocation,
     source_files: dict[str, str],
@@ -181,15 +202,43 @@ def build_code_state(
         return CodeState(file=location.file, total_lines=0)
 
     window_size = window_radius * 2 + 1
+    if location.line is None:
+        # The introduction window is deliberately NOT widened by the
+        # fitter. Given no executing line the fitter grew this to 14 lines,
+        # and a window that tall mixes long signatures with short braces,
+        # so the representative-width sizing produced a very wide spread of
+        # per-line sizes. Fewer lines, more evenly sized, reads better as
+        # an establishing shot.
+        window_size = DEFAULT_WINDOW_RADIUS * 2 + 1
     if location.line is None or total <= window_size:
-        lines, start_line = _trim_blank_edges(all_lines, 1, location.line)
+        start = 1
+        truncated = False
+        if location.line is None and total > window_size:
+            # The INTRODUCTION step cites no source line, so this used to
+            # fall through to "show the whole file" - all 24 lines of a
+            # real fixture. A window that tall is bound by HEIGHT
+            # rather than width, so the panel shrank to fit the band and
+            # the opening frame carried the smallest text in the video,
+            # most of it package/class/main boilerplate.
+            #
+            # With no executing line to centre on, the algorithm itself is
+            # the subject, so the window opens at the first block that is
+            # nested inside something else - in Java that is the first
+            # method, never the package line or the class declaration.
+            # Purely structural: it reads indentation and braces, and
+            # knows nothing about methods, algorithms or line numbers.
+            start = _first_nested_block_line(all_lines) or 1
+            truncated = start > 1 or total > window_size
+        window = all_lines[start - 1 : start + window_size - 1] \
+            if (location.line is None and total > window_size) else all_lines
+        lines, start_line = _trim_blank_edges(window, start, location.line)
         return CodeState(
             file=location.file,
             lines=lines,
             start_line=start_line,
             highlight_line=location.line,
             total_lines=total,
-            truncated=False,
+            truncated=truncated,
         )
 
     # Prefer the enclosing block when it fits: following execution inside
@@ -215,11 +264,40 @@ def build_code_state(
             end = min(total, start + window_size - 1)
             start = max(1, end - window_size + 1)
     else:
-        # Center the window on the executing line, then clamp so a line near
-        # either end of the file still yields a full-size window.
+        # The block does not fit, so the window must be narrower than it.
+        # Centre on the executing line, but STAY INSIDE the block.
+        #
+        # Phase 6.4, measured: a blind centred window at `int left = 0;`
+        # (line 5) spanned lines 1-9, which pulled in the package
+        # declaration and the 54-character method signature. Because the
+        # panel is fitted to the safe width, the longest visible line sets
+        # the font for every line, so those two boilerplate lines shrank
+        # the code from 79 px per line to 44 px - a 1.8x reduction caused
+        # entirely by text the learner does not need to read.
+        #
+        # Clamping to the block's interior keeps the window on the code
+        # being executed. It is a purely structural rule: `enclosing_block`
+        # counts braces and knows nothing about methods or algorithms.
         start = max(1, location.line - window_radius)
         end = min(total, start + window_size - 1)
         start = max(1, end - window_size + 1)
+        if block is not None:
+            interior_start, interior_end = block[0] + 1, block[1] - 1
+            # Only clamp when the executing line is INSIDE the interior.
+            # The active line can be the block's own opening line - a
+            # METHOD_ENTER event highlights the signature - and clamping
+            # then pushes the window past it. The regression test
+            # `test_real_trace_line_mapping_holds_to_the_displayed_label`
+            # caught exactly that on remove_duplicates: the window started
+            # at line 5 while line 4 was highlighted, so the panel showed
+            # no highlight at all. Keeping the executing line visible
+            # outranks every readability gain.
+            if (
+                interior_start <= location.line <= interior_end
+                and interior_end - interior_start + 1 >= window_size
+            ):
+                start = min(max(start, interior_start), interior_end - window_size + 1)
+                end = start + window_size - 1
 
     lines, start_line = _trim_blank_edges(
         all_lines[start - 1 : end], start, location.line

@@ -525,3 +525,81 @@ def test_the_window_keeps_context_on_both_sides_of_the_active_line() -> None:
     assert state.start_line + len(state.lines) - 1 > active, "no context below"
     visible = set(range(state.start_line, state.start_line + len(state.lines)))
     assert {6, 7} <= visible, "the reads the condition compares are off screen"
+
+
+# ---------------------------------------------------------------------------
+# Phase 6.4 — boilerplate must not set the font size for the whole panel.
+# ---------------------------------------------------------------------------
+
+METHOD_FILE = [
+    "package com.example.algorithms;",
+    "",
+    "public final class Main {",
+    "    public static boolean isPalindrome(char[] chars) {",
+    "        int left = 0;",
+    "        int right = chars.length - 1;",
+    "        while (left < right) {",
+    "            char a = chars[left];",
+    "            char b = chars[right];",
+    "            if (a != b) {",
+    "                return false;",
+    "            }",
+    "            left++;",
+    "            right--;",
+    "        }",
+    "        return true;",
+    "    }",
+    "}",
+]
+
+
+def _widest_drawn(line: int) -> int:
+    """Longest line the panel will actually render, after dedent.
+
+    This is the number that fixes the font size: the panel is scaled so
+    the longest visible line spans the safe width, so one long line makes
+    every line smaller.
+    """
+    state = _state(METHOD_FILE, line)
+    drawn = primitives._dedent_window(state.lines)
+    return max(len(text) for text in drawn)
+
+
+def test_boilerplate_does_not_set_the_font_size() -> None:
+    """The measured Phase 6.4 defect.
+
+    At `int left = 0;` the window used to span lines 1-9, dragging in the
+    package declaration and the 54-character method signature. Because the
+    longest visible line fixes the scale, the code rendered at 44 px per
+    line instead of 79 - a 1.8x reduction caused entirely by text the
+    learner does not need to read.
+    """
+    assert _widest_drawn(5) <= 32, "boilerplate is back in the window"
+    assert "package" not in " ".join(_state(METHOD_FILE, 5).lines)
+
+
+def test_every_line_of_the_method_body_renders_at_a_similar_size() -> None:
+    """Readability must not swing by a factor of two between frames of the
+    same lesson - that is what makes a video feel inconsistent."""
+    widths = [_widest_drawn(line) for line in range(5, 17)]
+    assert max(widths) - min(widths) <= 8, widths
+
+
+def test_the_executing_line_survives_the_narrowing() -> None:
+    """Non-negotiable, and the reason the first attempt at this was wrong:
+    clamping to the block interior pushed the window past a METHOD_ENTER
+    highlight on the signature line, leaving the panel with no highlight.
+    """
+    for line in range(1, len(METHOD_FILE) + 1):
+        state = _state(METHOD_FILE, line)
+        assert state.highlight_offset is not None, f"line {line} highlight hidden"
+        assert state.lines[state.highlight_offset] == METHOD_FILE[line - 1]
+
+
+def test_indentation_is_preserved_relative_to_the_block() -> None:
+    """Section 11: nesting is part of the teaching."""
+    state = _state(METHOD_FILE, 11)          # `return false;` inside the if
+    drawn = primitives._dedent_window(state.lines)
+    depths = {t.strip(): len(t) - len(t.lstrip(" ")) for t in drawn if t.strip()}
+    assert depths["return false;"] > depths["if (a != b) {"]
+    assert depths["if (a != b) {"] > depths["while (left < right) {"]

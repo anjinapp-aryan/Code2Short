@@ -72,16 +72,30 @@ def align_narration(
     """
     audio_by_segment = audio_by_segment or {}
 
-    # Visual timeline: step order -> (start, end). Steps are laid end to
-    # end in declared order, which is the plan's own semantics.
-    starts: dict[int, float] = {}
-    ends: dict[int, float] = {}
-    cursor = lead_in_seconds
-    for step in sorted(plan.steps, key=lambda s: s.order):
-        starts[step.order] = cursor
-        cursor += float(step.duration_seconds)
-        ends[step.order] = cursor
-    timeline_end = cursor
+    # Visual timeline: step order -> (start, end) of the interval where
+    # that step's frame is fully drawn and HOLDING.
+    #
+    # Phase 6.1. This used to lay steps end to end on `duration_seconds`
+    # alone, which silently assumed the renderer draws them with no
+    # animation between. It does not: a title fade, a cross-fade per step
+    # and a closing fade added 20.95 s to a 160.41 s plan. Narration was
+    # therefore placed earlier and earlier relative to the picture —
+    # 21 s of lead by the end — and the audio ran out 22.1 s before the
+    # video did. `visualization.timing` is now the single model of when a
+    # step is on screen, shared with the renderer that draws it.
+    # Imported inside the call: `visualization` imports narration for
+    # rendering, so a module-level import here would close a cycle.
+    from code2shorts.visualization.timing import (
+        step_windows,
+        total_video_seconds,
+    )
+
+    windows = step_windows(plan, lead_in_seconds)
+    starts = {order: window[0] for order, window in windows.items()}
+    ends = {order: window[1] for order, window in windows.items()}
+    # The audio track must cover the WHOLE rendered scene, closing fade
+    # included, or the file ends with unexplained silence.
+    timeline_end = total_video_seconds(plan, lead_in_seconds)
 
     aligned: list[AlignedSegment] = []
     for segment in sorted(narration.segments, key=lambda s: s.order):
@@ -198,12 +212,14 @@ def validate_teaching_synchronization(
     errors: list[str] = []
     steps = {step.order: step for step in plan.steps}
 
-    # The visual timeline, computed the same way align_narration does.
-    windows: dict[int, tuple[float, float]] = {}
-    cursor = 0.0
-    for step in sorted(plan.steps, key=lambda s: s.order):
-        windows[step.order] = (cursor, cursor + float(step.duration_seconds))
-        cursor += float(step.duration_seconds)
+    # The visual timeline, from the SAME model the renderer and the
+    # aligner use. Recomputing it here by laying steps end to end was the
+    # second copy of the assumption that produced the drift: a validator
+    # that reimplements the thing it is checking can only ever confirm its
+    # own arithmetic.
+    from code2shorts.visualization.timing import step_windows
+
+    windows = step_windows(plan)
 
     real_events = {event.step_index for event in trace.events} if trace else None
 

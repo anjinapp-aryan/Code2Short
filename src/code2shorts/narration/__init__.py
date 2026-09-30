@@ -1,3 +1,5 @@
+from code2shorts.narration.speech_text import to_spoken
+from code2shorts.narration.tts_kokoro import KokoroTTSProvider, Prosody
 from code2shorts.narration.tts import (
     MockTTSProvider,
     SapiTTSProvider,
@@ -30,6 +32,9 @@ from code2shorts.narration.subtitles import (
 from code2shorts.narration.validation import validate_narration
 
 __all__ = [
+    "KokoroTTSProvider",
+    "Prosody",
+    "to_spoken",
     "FitAdjustment",
     "FitResult",
     "fit_plan_to_narration",

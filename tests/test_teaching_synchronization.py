@@ -18,6 +18,7 @@ from code2shorts.ai.contracts import (
     VisualizationStepPlan,
 )
 from code2shorts.core.models import ExecutionTrace, TraceEvent, TraceEventType
+from code2shorts.visualization.timing import step_windows
 from code2shorts.narration import (
     align_narration,
     validate_each_moment_is_narrated_once,
@@ -93,13 +94,14 @@ def test_every_segment_occupies_exactly_its_own_visual_window() -> None:
     audio = _audio([1.0, 1.0])
     alignment, fitted = _aligned(plan, narration, audio)
 
-    windows = []
-    cursor = 0.0
-    for step in fitted.steps:
-        windows.append((cursor, cursor + step.duration_seconds))
-        cursor += step.duration_seconds
+    # From the shared timing model - the renderer's animation is part of
+    # when a step is actually on screen, and a test that recomputes the
+    # timeline by hand can only confirm its own arithmetic.
+    windows = step_windows(fitted)
 
-    for segment, (start, end) in zip(alignment.segments, windows):
+    for segment, (start, end) in zip(
+        alignment.segments, [windows[i] for i in range(len(fitted.steps))]
+    ):
         assert segment.start_seconds == pytest.approx(start)
         assert segment.end_seconds == pytest.approx(end)
 

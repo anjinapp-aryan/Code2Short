@@ -14,6 +14,12 @@ from code2shorts.ai.contracts import (
     VisualizationPlanResponse,
     VisualizationStepPlan,
 )
+from code2shorts.visualization.timing import (
+    STEP_FADE_IN_SECONDS,
+    STEP_FADE_OUT_SECONDS,
+    step_windows,
+    total_video_seconds,
+)
 from code2shorts.narration.alignment import (
     AlignmentError,
     align_narration,
@@ -60,10 +66,25 @@ def _narration(count: int, texts: list[str] | None = None) -> NarrationResponse:
 
 
 def test_segments_are_laid_on_the_visual_timeline() -> None:
-    result = align_narration(_narration(3), _plan([1.5, 2.0, 1.0]))
+    """Each segment occupies the interval where its step's frame HOLDS.
+
+    The spans are taken from `visualization.timing`, not written out by
+    hand. Hard-coded offsets are what hid the Phase 6.1 defect: they
+    encoded the assumption that steps are drawn back to back, while the
+    renderer was inserting a title fade and a cross-fade per step that
+    nothing in the audio timeline modelled.
+    """
+    plan = _plan([1.5, 2.0, 1.0])
+    result = align_narration(_narration(3), plan)
+    expected = step_windows(plan)
+
     spans = [(s.start_seconds, s.end_seconds) for s in result.segments]
-    assert spans == [(0.0, 1.5), (1.5, 3.5), (3.5, 4.5)]
-    assert result.total_duration_seconds == 4.5
+    assert spans == [expected[i] for i in range(3)]
+    # Still laid end to end in order, and each still as long as its step.
+    assert [round(e - s, 6) for s, e in spans] == [1.5, 2.0, 1.0]
+    assert result.total_duration_seconds == pytest.approx(
+        total_video_seconds(plan)
+    )
 
 
 def test_alignment_is_deterministic() -> None:
@@ -112,9 +133,18 @@ def test_audio_longer_than_its_step_is_flagged_not_absorbed() -> None:
     assert result.segments[0].overflowed is True
     assert result.segments[1].overflowed is False
     assert result.overflow_count == 1
-    # timeline is unchanged despite the 5s audio
-    assert result.total_duration_seconds == 2.0
-    assert result.segments[0].end_seconds == 1.0
+    # timeline is unchanged despite the 5s audio: the steps still declare
+    # 1.0 + 1.0, and the rest of the total is the renderer's own animation.
+    assert result.total_duration_seconds == pytest.approx(
+        total_video_seconds(_plan([1.0, 1.0]))
+    )
+    assert [round(s.end_seconds - s.start_seconds, 6) for s in result.segments] == [
+        1.0,
+        1.0,
+    ]
+    assert result.segments[0].end_seconds == pytest.approx(
+        result.segments[0].start_seconds + 1.0
+    )
 
 
 def test_shorter_audio_leaves_the_step_length_intact() -> None:
@@ -127,9 +157,18 @@ def test_shorter_audio_leaves_the_step_length_intact() -> None:
 
 
 def test_lead_in_offsets_every_segment() -> None:
-    result = align_narration(_narration(2), _plan([1.0, 1.0]), lead_in_seconds=0.5)
-    assert result.segments[0].start_seconds == 0.5
-    assert result.segments[1].start_seconds == 1.5
+    plan = _plan([1.0, 1.0])
+    result = align_narration(_narration(2), plan, lead_in_seconds=0.5)
+    without = align_narration(_narration(2), plan)
+    assert result.segments[0].start_seconds == pytest.approx(
+        without.segments[0].start_seconds + 0.5
+    )
+    # The second step still begins a full step after the first, plus
+    # the cross-fade the renderer draws between them.
+    assert result.segments[1].start_seconds == pytest.approx(
+        result.segments[0].end_seconds + STEP_FADE_OUT_SECONDS
+        + STEP_FADE_IN_SECONDS
+    )
 
 
 def test_validate_alignment_reports_uncovered_steps_and_overflow() -> None:
@@ -161,10 +200,24 @@ def test_srt_round_trips_and_validates() -> None:
 
 
 def test_srt_timestamps_match_alignment() -> None:
+    """Subtitles must carry the SAME timestamps the audio was placed on."""
     result = align_narration(_narration(2), _plan([1.5, 2.5]))
     content = build_srt(result)
-    assert "00:00:00,000 --> 00:00:01,500" in content
-    assert "00:00:01,500 --> 00:00:04,000" in content
+    first = result.segments[0]
+
+    def stamp(seconds: float) -> str:
+        millis = round(seconds * 1000)
+        return (
+            f"{millis // 3600000:02d}:{millis // 60000 % 60:02d}:"
+            f"{millis // 1000 % 60:02d},{millis % 1000:03d}"
+        )
+
+    assert f"{stamp(first.start_seconds)} --> {stamp(first.end_seconds)}" in content
+    second = result.segments[1]
+    assert (
+        f"{stamp(second.start_seconds)} --> {stamp(second.end_seconds)}"
+        in content
+    )
 
 
 def test_srt_preserves_java_terminology_and_unicode() -> None:

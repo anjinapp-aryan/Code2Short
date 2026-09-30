@@ -78,10 +78,20 @@ def test_srt_injection_cannot_forge_extra_cues() -> None:
     narration = NarrationResponse(
         segments=[NarrationSegment(order=0, text=payload, visualization_step_order=0)]
     )
-    content = build_srt(align_narration(narration, _plan(1)))
+    alignment = align_narration(narration, _plan(1))
+    content = build_srt(alignment)
     cues = list(srt.parse(content))
     assert len(cues) == 1, f"injection created {len(cues)} cues"
-    assert cues[0].end.total_seconds() == 2.0  # our timing, not the payload's
+    # The cue carries OUR timeline's timing, never the payload's. Compared
+    # against the alignment rather than a literal, so the property is
+    # asserted rather than a particular arithmetic result.
+    assert cues[0].start.total_seconds() == pytest.approx(
+        alignment.segments[0].start_seconds
+    )
+    assert cues[0].end.total_seconds() == pytest.approx(
+        alignment.segments[0].end_seconds
+    )
+    assert cues[0].end.total_seconds() < 10.0, "payload timing leaked into the cue"
 
 
 # ---- TTS subprocess channel ---------------------------------------------

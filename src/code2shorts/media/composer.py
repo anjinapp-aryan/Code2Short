@@ -30,6 +30,13 @@ class MediaCompositionFailure(Exception):
     pass
 
 
+AUDIO_SAMPLE_RATE = 44100
+AUDIO_BITRATE = "128k"
+"""Final AAC settings. Mono speech at 128 kbit/s is transparent; the point
+is to stop the encoder adding its own artefacts on top of a source that
+already measured hot."""
+
+
 class MediaComposer:
     def __init__(
         self,
@@ -64,6 +71,16 @@ class MediaComposer:
             "copy",
             "-c:a",
             "aac",
+            # Phase 6.1. The old default encoded a 22.05 kHz mono source at
+            # ~58 kbit/s. The narration track is now assembled and
+            # loudness-normalised at 44.1 kHz, so state the rate and give
+            # the encoder enough bits that it is not the weakest link;
+            # measured, the previous file's true peak sat at -0.0 dBFS with
+            # no headroom for AAC's inter-sample overshoot.
+            "-ar",
+            str(AUDIO_SAMPLE_RATE),
+            "-b:a",
+            AUDIO_BITRATE,
             # Pad the audio with silence, then cap the output at exactly the
             # video's duration.
             #

@@ -30,3 +30,6 @@ htmlcov/
 # workspaces) — never commit compiled output, only source.
 target/
 dependency-reduced-pom.xml
+
+# Neural TTS weights: ~340 MB, fetched once, never vendored.
+/models/
