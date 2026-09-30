@@ -1,0 +1,76 @@
+{# Shared fragments, so a "video card" cannot mean two different things
+   on two pages. #}
+
+{% macro status_pill(status) -%}
+  <span class="pill pill-{{ status }}">{{ status|replace('_',' ') }}</span>
+{%- endmacro %}
+
+{% macro duration(seconds) -%}
+  {%- if seconds -%}
+    {{ '%d:%02d'|format(seconds|int // 60, seconds|int % 60) }}
+  {%- else -%}—{%- endif -%}
+{%- endmacro %}
+
+{% macro video_card(row) %}
+<article class="card">
+  <div class="card-poster">
+    {% if row.current and row.current.status.value == 'completed' %}
+      <video class="poster-video" muted preload="metadata"
+             src="/media/{{ row.program.slug }}/v{{ row.current.version }}/final_video#t=0.5"></video>
+    {% else %}
+      <div class="poster-empty" aria-hidden="true">1080 × 1920</div>
+    {% endif %}
+  </div>
+  <div class="card-body">
+    <div class="card-head">
+      <h3 class="card-title">{{ row.program.title }}</h3>
+      {% if row.job %}
+        {{ status_pill('running') }}
+      {% elif row.current %}
+        {{ status_pill(row.current.status.value) }}
+      {% else %}
+        <span class="pill pill-none">not generated</span>
+      {% endif %}
+    </div>
+    <p class="card-summary">{{ row.program.summary }}</p>
+
+    <dl class="meta">
+      <div><dt>Voice</dt><dd>{{ row.current.request_fingerprint.config.voice if row.current else '—' }}</dd></div>
+      <div><dt>Duration</dt><dd>{{ duration(row.current.duration_seconds) if row.current else '—' }}</dd></div>
+      <div><dt>Version</dt><dd>{% if row.current %}v{{ row.current.version }}{% else %}—{% endif %}</dd></div>
+      <div><dt>Renderer</dt><dd>{{ row.current.request_fingerprint.renderer_version if row.current else '—' }}</dd></div>
+    </dl>
+
+    <div class="card-actions">
+      {% if row.job %}
+        <a class="btn btn-primary" href="/jobs/{{ row.job.id }}">View progress</a>
+      {% elif row.current %}
+        <a class="btn btn-primary" href="/videos/{{ row.program.slug }}/v{{ row.current.version }}">Watch</a>
+        <a class="btn" href="/videos/{{ row.program.slug }}/v{{ row.current.version }}">Details</a>
+        {# Re-generate is a POST with force=1: never a link, so it cannot
+           be triggered by a prefetch or a shared URL. #}
+        <form method="post" action="/create/start" class="inline">
+          <input type="hidden" name="program" value="{{ row.program.slug }}">
+          <input type="hidden" name="voice" value="{{ row.current.request_fingerprint.config.voice }}">
+          <input type="hidden" name="force" value="1">
+          <button class="btn btn-ghost" type="submit">Re-generate</button>
+        </form>
+      {% else %}
+        <a class="btn btn-primary" href="/create?program={{ row.program.slug }}">Create video</a>
+      {% endif %}
+    </div>
+  </div>
+</article>
+{% endmacro %}
+
+{% macro stage_list(stages) %}
+<ol class="stages">
+  {% for stage in stages %}
+    <li class="stage stage-{{ stage.state.value if stage.state.value is defined else stage.state }}">
+      <span class="stage-mark" aria-hidden="true"></span>
+      <span class="stage-label">{{ stage.label }}</span>
+      {% if stage.detail %}<span class="stage-detail">{{ stage.detail }}</span>{% endif %}
+    </li>
+  {% endfor %}
+</ol>
+{% endmacro %}

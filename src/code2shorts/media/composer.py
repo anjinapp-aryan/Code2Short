@@ -14,6 +14,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from code2shorts.execution.sandbox import ProcessResult, run_subprocess
+from code2shorts.narration.alignment import AlignmentResult
 
 COMPOSER_VERSION = "code2shorts-ffmpeg-composer-1.0"
 
@@ -35,6 +36,43 @@ AUDIO_BITRATE = "128k"
 """Final AAC settings. Mono speech at 128 kbit/s is transparent; the point
 is to stop the encoder adding its own artefacts on top of a source that
 already measured hot."""
+
+
+def assemble_narration_track(
+    alignment: AlignmentResult,
+    output_path: Path,
+    timeout_seconds: float = 300.0,
+    run_subprocess_fn: Callable[..., ProcessResult] | None = None,
+) -> Path:
+    """One narration track with every segment at its aligned start.
+
+    Moved unchanged from `scripts/run_phase5_golden_path.py`, the golden
+    path that produced the accepted Phase 6.5.3 video, so the workflow and
+    the script place speech with the same code rather than two copies of
+    it. `adelay` puts each segment at `start_seconds`; `amix` without
+    normalisation sums them (they never overlap - `align_narration`
+    asserts that). The track runs to `total_duration_seconds`, which is
+    the rendered scene's length, closing fade included.
+    """
+    run = run_subprocess_fn or run_subprocess
+    output_path = output_path.resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    paths = [Path(s.audio_path).resolve() for s in alignment.segments]
+    command = ["ffmpeg", "-y"]
+    for path in paths:
+        command += ["-i", str(path)]
+    filters = [
+        f"[{i}:a]adelay={int(s.start_seconds*1000)}|{int(s.start_seconds*1000)}[a{i}]"
+        for i, s in enumerate(alignment.segments)
+    ]
+    filters.append("".join(f"[a{i}]" for i in range(len(paths)))
+                   + f"amix=inputs={len(paths)}:normalize=0[out]")
+    command += ["-filter_complex", ";".join(filters), "-map", "[out]",
+                "-t", f"{alignment.total_duration_seconds:.3f}", str(output_path)]
+    result = run(command, cwd=output_path.parent, timeout_seconds=timeout_seconds)
+    if result.timed_out or result.returncode != 0:
+        raise MediaCompositionFailure(f"audio concat failed: {result.stderr[-1000:]}")
+    return output_path
 
 
 class MediaComposer:

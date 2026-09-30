@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% from "_macros.html" import status_pill, duration %}
+{% block title %}{{ program.title }} · Code2Shorts{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div class="page-head-main">
+    <h1>{{ program.title }}</h1>
+    {{ status_pill(version.status.value) }}
+    <span class="version-tag">v{{ version.version }}</span>
+  </div>
+  <div class="page-head-actions">
+    {% if has_video %}
+      <a class="btn" href="/media/{{ program.slug }}/v{{ version.version }}/final_video"
+         download>Export</a>
+    {% endif %}
+    <form method="post" action="/create/start" class="inline">
+      <input type="hidden" name="program" value="{{ program.slug }}">
+      <input type="hidden" name="audience" value="{{ version.request_fingerprint.config.audience }}">
+      <input type="hidden" name="teaching_style" value="{{ version.request_fingerprint.config.teaching_style }}">
+      <input type="hidden" name="voice" value="{{ version.request_fingerprint.config.voice }}">
+      <input type="hidden" name="force" value="1">
+      <button class="btn btn-primary" type="submit">Re-generate</button>
+    </form>
+  </div>
+</div>
+
+<div class="studio">
+  <div class="stage-pane">
+    {% if has_video %}
+      <video class="player" controls preload="metadata"
+             src="/media/{{ program.slug }}/v{{ version.version }}/final_video"></video>
+    {% else %}
+      <div class="poster-empty poster-tall">
+        {% if version.error %}Generation failed{% else %}No video for this version{% endif %}
+      </div>
+    {% endif %}
+  </div>
+
+  <aside class="side-pane">
+    <h2 class="side-title">Versions</h2>
+    <ul class="versions">
+      {% for other in versions %}
+        <li class="version {% if other.version == version.version %}is-current{% endif %}">
+          <a href="/videos/{{ program.slug }}/v{{ other.version }}">v{{ other.version }}</a>
+          {{ status_pill(other.status.value) }}
+          {% if other.version == version.version %}<span class="tag">viewing</span>{% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+    <p class="hint">Nothing is overwritten. Every generation gets its own
+       version and stays inspectable.</p>
+  </aside>
+</div>
+
+{% if version.error %}
+  <div class="notice notice-error"><h2>Generation failed</h2><p>{{ version.error }}</p></div>
+{% endif %}
+
+<div class="tabs">
+  <input type="radio" name="tab" id="tab-overview" checked>
+  <label for="tab-overview">Overview</label>
+  <input type="radio" name="tab" id="tab-artifacts">
+  <label for="tab-artifacts">Artifacts</label>
+  <input type="radio" name="tab" id="tab-identity">
+  <label for="tab-identity">Identity</label>
+
+  <section class="tab-panel" data-for="tab-overview">
+    <dl class="summary">
+      <div><dt>Program</dt><dd>{{ program.title }}</dd></div>
+      <div><dt>Input</dt><dd><code>{{ program.input_value }}</code></dd></div>
+      <div><dt>Duration</dt><dd>{{ duration(version.duration_seconds) }}</dd></div>
+      <div><dt>Voice</dt><dd>{{ version.request_fingerprint.config.voice }}</dd></div>
+      <div><dt>Audience</dt><dd>{{ version.request_fingerprint.config.audience }}</dd></div>
+      <div><dt>LLM provider</dt><dd>{{ version.request_fingerprint.llm_provider }}</dd></div>
+      <div><dt>Renderer</dt><dd>{{ version.request_fingerprint.renderer_version }}</dd></div>
+      <div><dt>Generated</dt><dd>{{ version.created_at.strftime('%Y-%m-%d %H:%M') }}</dd></div>
+    </dl>
+  </section>
+
+  <section class="tab-panel" data-for="tab-artifacts">
+    {% if version.artifacts %}
+      <ul class="artifacts">
+        {% for name in version.artifacts|sort %}
+          <li>
+            <a class="link" href="/media/{{ program.slug }}/v{{ version.version }}/{{ name }}">
+              {{ name|replace('_',' ') }}
+            </a>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="empty">This version produced no inspectable artifacts.</p>
+    {% endif %}
+  </section>
+
+  <section class="tab-panel" data-for="tab-identity">
+    <p class="hint">What identifies this generation. A change to any of it
+       means the current code would produce a different video.</p>
+    <dl class="summary mono">
+      <div><dt>Request digest</dt><dd>{{ version.request_fingerprint.digest[:16] }}…</dd></div>
+      <div><dt>Source hash</dt><dd>{{ version.request_fingerprint.source_hash[:16] }}…</dd></div>
+      {% if version.content_fingerprint %}
+        {% for label, value in [
+             ('Trace', version.content_fingerprint.trace_hash),
+             ('Educational plan', version.content_fingerprint.educational_plan_hash),
+             ('Visualization plan', version.content_fingerprint.visualization_plan_hash),
+             ('Narration', version.content_fingerprint.narration_hash)] %}
+          {% if value %}<div><dt>{{ label }}</dt><dd>{{ value[:16] }}…</dd></div>{% endif %}
+        {% endfor %}
+      {% endif %}
+    </dl>
+  </section>
+</div>
+{% endblock %}

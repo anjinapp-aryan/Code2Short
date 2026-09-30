@@ -29,7 +29,19 @@ from code2shorts.core.models import ExecutionTrace, TraceStatus, ValidationResul
 from code2shorts.execution.sandbox import Workspace
 from code2shorts.langadapter.java import JavaAdapter
 from code2shorts.llm.provider import LLMProvider
-from code2shorts.media.composer import MediaComposer, MediaCompositionFailure
+from code2shorts.media.composer import (
+    AUDIO_SAMPLE_RATE,
+    MediaComposer,
+    MediaCompositionFailure,
+    assemble_narration_track,
+)
+from code2shorts.media.probe import probe_video
+from code2shorts.media.validation import MediaPolicy, validate_final_video, validate_timeline
+from code2shorts.narration.alignment import AlignmentError, AlignmentResult, align_narration
+from code2shorts.narration.audio import AudioProcessingError, normalize_track
+from code2shorts.narration.fitting import fit_plan_to_narration
+from code2shorts.narration.speech_text import to_spoken
+from code2shorts.narration.subtitles import write_srt
 from code2shorts.narration.tts import TTSFailure, TTSProvider
 from code2shorts.narration.validation import validate_narration
 from code2shorts.visualization.renderer import RenderContext, RenderingFailure, VideoRenderer
@@ -774,10 +786,103 @@ class NarrationNode(WorkflowNode):
         )
 
 
+class NarrationTimingNode(WorkflowNode):
+    """Measure the speech, then fit the visual timeline to it BEFORE render.
+
+    The golden path's timing stages, as a node, calling the same functions
+    in the same order (`scripts/run_phase5_golden_path.py`):
+
+        per-segment TTS of `to_spoken(text)`   one file per segment
+        fit_plan_to_narration                   widen-only, never cut
+        align_narration                         place each segment in its step
+
+    Without it the web path rendered the LLM's proposed durations and
+    then muxed one unplaced track over them, and `-t` cut the 10.8 s of
+    speech that did not fit (Phase 7.1). The fitted plan is stored as its
+    own artifact, so what the model proposed and what was rendered both
+    stay inspectable; `RenderVideoNode` renders the fitted one.
+    """
+
+    name = "narration_timing"
+
+    def __init__(self, tts_provider: TTSProvider, output_dir: Path) -> None:
+        self._tts_provider = tts_provider
+        self._output_dir = output_dir
+
+    def run(self, state: Code2ShortsState, context: WorkflowContext) -> NodeResult:
+        plan_artifact_id = state.artifact_ids.get("visualization_plan")
+        narration_artifact_id = state.artifact_ids.get("narration")
+        if plan_artifact_id is None or narration_artifact_id is None:
+            raise NodeExecutionError(
+                FailureKind.PERMANENT,
+                "narration timing requires visualization_plan + narration artifacts",
+            )
+        plan_artifact = context.artifact_store.get(plan_artifact_id)
+        narration_artifact = context.artifact_store.get(narration_artifact_id)
+        if plan_artifact is None or narration_artifact is None:
+            raise NodeExecutionError(FailureKind.PERMANENT, "referenced artifact missing from store")
+        plan = VisualizationPlanResponse.model_validate(plan_artifact.content)
+        narration = NarrationResponse.model_validate(narration_artifact.content)
+
+        work_dir = self._output_dir / state.metadata.execution_id / "speech"
+        audio: dict[int, tuple[str, float]] = {}
+        spoken: list[dict] = []
+        for segment in narration.segments:
+            # Speak the spoken form; subtitles keep `segment.text` exactly.
+            try:
+                result = self._tts_provider.synthesize(
+                    to_spoken(segment.text), work_dir / f"seg_{segment.order}"
+                )
+            except TTSFailure as error:
+                raise NodeExecutionError(
+                    FailureKind.TRANSIENT, f"TTS synthesis failed: {error}"
+                ) from error
+            audio[segment.order] = (result.audio_path, result.duration_seconds)
+            spoken.append(result.model_dump())
+
+        fit = fit_plan_to_narration(plan, narration, audio)
+        try:
+            alignment = align_narration(narration, fit.plan, audio_by_segment=audio)
+        except AlignmentError as error:
+            raise NodeExecutionError(
+                FailureKind.VALIDATION, f"narration could not be aligned: {error}"
+            ) from error
+
+        timed_plan_artifact = Artifact.create(
+            type=ArtifactType.VISUALIZATION_PLAN,
+            producer=self.name,
+            content=fit.plan.model_dump(),
+            input_artifact_ids=[plan_artifact_id, narration_artifact_id],
+        )
+        context.artifact_store.save(timed_plan_artifact)
+        state.artifact_ids["timed_visualization_plan"] = timed_plan_artifact.id
+
+        timing_artifact = Artifact.create(
+            type=ArtifactType.AUDIO,
+            producer=self.name,
+            content={
+                "alignment": alignment.model_dump(),
+                "fit_adjustments": [a.model_dump() for a in fit.adjustments],
+                "segments": spoken,
+            },
+            input_artifact_ids=[narration_artifact_id, timed_plan_artifact.id],
+        )
+        context.artifact_store.save(timing_artifact)
+        state.artifact_ids["narration_timing"] = timing_artifact.id
+
+        return NodeResult(
+            state=state,
+            artifact_ids_created=[timed_plan_artifact.id, timing_artifact.id],
+        )
+
+
 class RenderVideoNode(WorkflowNode):
     """Trusted renderer stage. `renderer` interprets the ALREADY-VALIDATED
     VisualizationPlanResponse using code we wrote — never AI-authored
     Manim/Python source. See visualization/renderer.py.
+
+    Renders the narration-fitted plan when `NarrationTimingNode` has run,
+    otherwise the plan as proposed.
     """
 
     name = "render_video"
@@ -787,7 +892,9 @@ class RenderVideoNode(WorkflowNode):
         self._output_dir = output_dir
 
     def run(self, state: Code2ShortsState, context: WorkflowContext) -> NodeResult:
-        plan_artifact_id = state.artifact_ids.get("visualization_plan")
+        plan_artifact_id = state.artifact_ids.get(
+            "timed_visualization_plan"
+        ) or state.artifact_ids.get("visualization_plan")
         if plan_artifact_id is None:
             raise NodeExecutionError(
                 FailureKind.PERMANENT, "rendering requires a visualization plan; run that node first"
@@ -877,18 +984,31 @@ class ComposeMediaNode(WorkflowNode):
     """Trusted media composition: narration text -> TTS audio (TTSProvider)
     + rendered video -> final video (MediaComposer, fixed-argument FFmpeg
     invocation). No AI-authored command ever reaches either.
+
+    When `NarrationTimingNode` has run, the already-measured, already-placed
+    segments are composed instead, exactly as the golden path does it:
+    assemble the aligned track, loudness-normalise it, write the SRT, mux,
+    then validate the final file and the timeline against it. Without
+    timing (Phase 4 callers) the original single-track behaviour is kept.
     """
 
     name = "compose_media"
 
     def __init__(
-        self, tts_provider: TTSProvider, composer: MediaComposer, output_dir: Path
+        self,
+        tts_provider: TTSProvider,
+        composer: MediaComposer,
+        output_dir: Path,
+        media_policy: MediaPolicy | None = None,
     ) -> None:
         self._tts_provider = tts_provider
         self._composer = composer
         self._output_dir = output_dir
+        self.media_policy = media_policy or MediaPolicy()
 
     def run(self, state: Code2ShortsState, context: WorkflowContext) -> NodeResult:
+        if "narration_timing" in state.artifact_ids:
+            return self._compose_timed(state, context)
         video_artifact_id = state.artifact_ids.get("rendered_video")
         narration_artifact_id = state.artifact_ids.get("narration")
         if video_artifact_id is None or narration_artifact_id is None:
@@ -948,6 +1068,84 @@ class ComposeMediaNode(WorkflowNode):
             state=state, artifact_ids_created=[audio_artifact.id, final_artifact.id]
         )
 
+    def _compose_timed(self, state: Code2ShortsState, context: WorkflowContext) -> NodeResult:
+        video_artifact_id = state.artifact_ids.get("rendered_video")
+        timing_artifact_id = state.artifact_ids["narration_timing"]
+        video_artifact = context.artifact_store.get(video_artifact_id) if video_artifact_id else None
+        timing_artifact = context.artifact_store.get(timing_artifact_id)
+        if video_artifact is None or timing_artifact is None:
+            raise NodeExecutionError(
+                FailureKind.PERMANENT,
+                "media composition requires rendered_video + narration_timing artifacts",
+            )
+        alignment = AlignmentResult.model_validate(timing_artifact.content["alignment"])
+
+        work_dir = self._output_dir / state.metadata.execution_id / "compose"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        video_path = Path(video_artifact.content["output_path"])
+        video_duration = video_artifact.content["duration_seconds"]
+        final_path = work_dir / "final.mp4"
+        try:
+            track = assemble_narration_track(alignment, work_dir / "narration.wav")
+            # The assembled track, not each segment: normalising segments
+            # separately flattens the natural level differences between
+            # sentences (golden path, Phase 6.1).
+            normalize_track(track, sample_rate=AUDIO_SAMPLE_RATE)
+            compose_result = self._composer.compose(
+                video_path, track, final_path, video_duration
+            )
+        except (MediaCompositionFailure, AudioProcessingError) as error:
+            raise NodeExecutionError(
+                FailureKind.TRANSIENT, f"media composition failed: {error}"
+            ) from error
+        subtitles_path = write_srt(alignment, work_dir / "subtitles.srt")
+
+        audio_artifact = Artifact.create(
+            type=ArtifactType.AUDIO,
+            producer=self.name,
+            content={"path": str(track), "total_duration_seconds": alignment.total_duration_seconds},
+            input_artifact_ids=[timing_artifact_id],
+        )
+        subtitles_artifact = Artifact.create(
+            type=ArtifactType.SUBTITLES,
+            producer=self.name,
+            content={"path": str(subtitles_path)},
+            input_artifact_ids=[timing_artifact_id],
+        )
+        final_artifact = Artifact.create(
+            type=ArtifactType.FINAL_VIDEO,
+            producer=self.name,
+            content=compose_result.model_dump(),
+            input_artifact_ids=[video_artifact_id, audio_artifact.id],
+        )
+        for artifact in (audio_artifact, subtitles_artifact, final_artifact):
+            context.artifact_store.save(artifact)
+        state.artifact_ids["audio"] = audio_artifact.id
+        state.artifact_ids["subtitles"] = subtitles_artifact.id
+        state.artifact_ids["final_video"] = final_artifact.id
+
+        # The golden path's two gates, on THIS run's file. The picture must
+        # not have been cut or stretched by the mux, and every cue must sit
+        # inside the video that was actually produced.
+        media = validate_final_video(
+            final_path, self.media_policy, expected_duration_seconds=video_duration
+        )
+        timeline = validate_timeline(alignment, probe_video(final_path).duration_seconds)
+        errors: list[str] = []
+        for result in (media, timeline):
+            result = result.model_copy(update={"subject_artifact_id": final_artifact.id})
+            state.validation.record(result)
+            errors += result.errors
+        if errors:
+            raise NodeExecutionError(
+                FailureKind.VALIDATION, "final media validation failed", detail={"errors": errors}
+            )
+
+        return NodeResult(
+            state=state,
+            artifact_ids_created=[audio_artifact.id, subtitles_artifact.id, final_artifact.id],
+        )
+
 
 class FinalValidationNode(WorkflowNode):
     """Domain-level trust gate at the very end of the pipeline: the final
@@ -969,7 +1167,13 @@ class FinalValidationNode(WorkflowNode):
         elif not final_artifact.content.get("checksum"):
             errors.append("final_video artifact has no checksum")
 
-        failed_results = [r for r in state.validation.results if not r.passed]
+        # Superseded repair attempts are audit evidence, not verdicts: the
+        # attempt that replaced them is in `results` too and is judged on
+        # its own. Counting them failed every run in which repair worked
+        # (Phase 7.1). Same rule as `ValidationSummary.all_passed`.
+        failed_results = [
+            r for r in state.validation.results if not r.passed and not r.superseded
+        ]
         if failed_results:
             errors.append(f"{len(failed_results)} earlier validation result(s) did not pass")
 

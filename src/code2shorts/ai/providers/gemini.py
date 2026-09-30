@@ -46,6 +46,16 @@ class GeminiPermanentError(GeminiProviderError):
     map this to FailureKind.PERMANENT, never auto-retry it."""
 
 
+# HTTP status is checked BEFORE the class name because litellm collapses
+# several statuses into a generic `APIError`, and that class had to be
+# treated as transient to stay safe. Measured: an HTTP 403 arrived as
+# `APIError` and was therefore classified transient, which in a failover
+# chain means a forbidden key is retried at two more vendors instead of
+# being reported. The status is unambiguous when present, so it wins.
+PERMANENT_STATUS = frozenset({400, 401, 403, 404, 405, 409, 413, 422})
+TRANSIENT_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
+
+
 def _default_completion_fn(**kwargs: Any) -> Any:
     import litellm  # imported lazily so importing this module never requires litellm's transitive deps to be resolvable in odd environments
 
@@ -125,6 +135,13 @@ class GeminiLLMProvider(LLMProvider):
         that move those classes around, and keeps the transient/permanent
         split explicit and reviewable in one place.
         """
+        status = getattr(error, "status_code", None)
+        if isinstance(status, int):
+            if status in PERMANENT_STATUS:
+                return GeminiPermanentError(f"HTTP {status}: {error}")
+            if status in TRANSIENT_STATUS:
+                return GeminiTransientError(f"HTTP {status}: {error}")
+
         name = type(error).__name__
         transient_names = {"Timeout", "APIConnectionError", "RateLimitError", "ServiceUnavailableError"}
         permanent_names = {"AuthenticationError", "BadRequestError", "InvalidRequestError", "PermissionDeniedError", "NotFoundError"}

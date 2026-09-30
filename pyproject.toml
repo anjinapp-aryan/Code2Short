@@ -25,6 +25,25 @@ render = [
     # see docs/PHASE_4_1_REAL_RENDER.md for the one-line Windows setup.
     "imageio-ffmpeg>=0.5",
 ]
+web = [
+    # Phase 7.0 UI. OPTIONAL: the pipeline, the CLI and every test outside
+    # tests/test_webapp.py run without any of it, and the UI adds nothing
+    # to the generation path - it calls the same workflow nodes.
+    #
+    #   fastapi          MIT   routing
+    #   uvicorn          BSD-3 ASGI server
+    #   jinja2           BSD-3 templates, with AUTOESCAPING - the reason a
+    #                          template engine is used rather than string
+    #                          formatting, which is how XSS gets written
+    #   python-multipart MIT   HTML form parsing
+    #
+    # All four are permissive, so Code2Shorts stays MIT. No Node toolchain,
+    # no bundler, no build step: the pages are server-rendered.
+    "fastapi>=0.110",
+    "uvicorn>=0.30",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
+]
 neural-tts = [
     # Phase 6.2. OPTIONAL: without it the pipeline still speaks, via the
     # Windows SAPI provider. Both are permissively licensed, which is the

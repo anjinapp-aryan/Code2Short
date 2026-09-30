@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% from "_macros.html" import video_card %}
+{% block title %}Videos · Code2Shorts{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Videos</h1>
+  <a class="btn btn-primary" href="/create">+ Create Video</a>
+</div>
+
+<nav class="filters" aria-label="Filter by status">
+  {% for name in ['all', 'completed', 'running', 'failed'] %}
+    <a class="filter {% if status == name %}is-active{% endif %}"
+       href="/videos?status={{ name }}">{{ name|capitalize }}</a>
+  {% endfor %}
+</nav>
+
+{% if rows %}
+  <div class="cards">
+    {% for row in rows %}{{ video_card(row) }}{% endfor %}
+  </div>
+{% else %}
+  <p class="empty">No videos match this filter.</p>
+{% endif %}
+{% endblock %}

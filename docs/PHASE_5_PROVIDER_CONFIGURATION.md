@@ -174,17 +174,92 @@ Worth noting for later: Groq exposes an OpenAI-compatible endpoint at
 constant and no new provider class**, exactly like xAI. It is a future
 option, not a commitment, and requires an explicit request.
 
-## 9. Fallback — declared, deliberately not automatic
+## 9. Fallback — automatic, but only when you ask for it (Phase 6.5.4)
 
-`LLM_FALLBACK_PROVIDER` is read and **validated** (if you declare a
-fallback that needs a credential, that credential must be present), but
-**no automatic runtime failover is wired in**.
+`LLM_FALLBACK_PROVIDER` is still **declaration only**: setting it does not
+change which provider is built. A config key must never silently alter the
+`producer` recorded on an artifact.
 
-Silently switching provider mid-run would change the `producer` recorded on
-an artifact while the artifact still claims one lineage, and it would mask
-a failing primary instead of surfacing it. Given that artifact lineage is
-load-bearing in this architecture, that is a design decision to take
-deliberately — not a side effect of reading a config key. See §13.
+Automatic failover is a separate, explicit choice:
+
+```
+CODE2SHORTS_LLM_PROVIDER=failover
+```
+
+That builds an ordered chain and nothing else does.
+
+### Order
+
+```
+CODE2SHORTS_LLM_PROVIDER_ORDER=omniroute,openrouter,gemini   # the default
+```
+
+    OmniRoute   PRIMARY
+        |  transient failure
+        v
+    OpenRouter  FALLBACK
+        |  transient failure
+        v
+    Gemini      FALLBACK
+        |
+        v
+    answer
+
+Deterministic: read once, never shuffled, never load balanced, never
+reordered by latency. A provider with no credential is **skipped**, not
+attempted — so a machine with only a Gemini key gets a one-provider chain
+rather than a startup failure. A chain with *no* configured member fails
+immediately, at startup, naming the variables to set.
+
+### When it falls through, and when it does not
+
+| Outcome | Behaviour |
+|---|---|
+| 429, 500, 502, 503, 504 | **fall through** to the next provider |
+| 408, 425, connection timeout / reset, endpoint not listening | **fall through** |
+| 400, 401, 403, 404, 405, 409, 413, 422 | **stop** — report the real error |
+| invalid model, malformed request, invalid schema | **stop** |
+
+A wrong API key is not a transient outage. Falling through on it would turn
+one clear "your credential is invalid" into three vague failures at three
+vendors and leave the real cause unreported.
+
+### Bounded
+
+Each provider is attempted **once**; the chain is the retry. Members are
+built with `max_retries=0`, because three providers each retrying three
+times would be nine requests against exactly the rate-limited free tiers
+this feature exists to route around. There is no loop back to an earlier
+provider, no recursion, and no retry of the chain itself.
+
+### Lineage
+
+`provider.describe` reports the provider that **answered**, plus
+`fallback_from` when it was not the primary:
+
+```json
+{"provider": "openrouter", "chain": "omniroute,openrouter,gemini",
+ "fallback_from": "omniroute"}
+```
+
+A fallback run therefore can never read as a clean primary run — which was
+ADR-5.10's condition for allowing failover at all. See ADR-6.9.
+
+### Credentials
+
+```
+CODE2SHORTS_LLM_API_KEY=...            # OmniRoute  (or OMNI_ROUTE_LLM_API_KEY)
+CODE2SHORTS_LLM_BASE_URL=...           # OmniRoute  (defaults to localhost:20128/v1)
+CODE2SHORTS_OPENROUTER_API_KEY=...     # OpenRouter (or OPENROUTER_API_KEY)
+CODE2SHORTS_OPENROUTER_MODEL=...       # defaults to a free-tier model
+CODE2SHORTS_GEMINI_API_KEY=...         # Gemini     (or GEMINI_API_KEY)
+CODE2SHORTS_GEMINI_MODEL=...           # defaults to gemini-1.5-flash
+```
+
+OpenRouter has **no provider class**: `https://openrouter.ai/api/v1` is
+OpenAI-compatible, so it cost one URL constant and one key (ADR-5.1).
+Keys are `SecretStr`, unwrapped only at the wire, and never logged — the
+chain logs provider names, status classes and prompt *lengths* only.
 
 ## 10. Provider architecture is unchanged
 
@@ -234,7 +309,8 @@ their entire purpose. When they skip, the reason states that they did
 ## 13. Known gaps
 
 * **Grok is unverified** — invalid credential (§8).
-* **No automatic failover** — `LLM_FALLBACK_PROVIDER` declares intent only (§9).
+* **Automatic failover is opt-in** — `LLM_PROVIDER=failover` (§9);
+  `LLM_FALLBACK_PROVIDER` still declares intent only, by design.
 * **No Docker or CI configuration exists** in this repository, so the
   production model is verified by clean-environment subprocess dry runs
   rather than in a container or pipeline.

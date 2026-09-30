@@ -1727,3 +1727,54 @@ to fit its band, and an AST test forbids whole-scene scaling.
 Whether a human can read the result is settled by inspecting real frames,
 which stays mandatory — a contact sheet of the palindrome run is legible
 at 270x480 thumbnail scale, which is the actual evidence.
+
+---
+
+## Phase 6.5.4 — automatic cloud provider failover
+
+### ADR-6.9 Failover is opt-in, ordered, bounded, and names its real producer
+
+**Status:** Accepted. **Supersedes the deferral in ADR-5.10**, and meets
+every condition that ADR set for ever implementing it.
+
+**Context.** ADR-5.10 declared `LLM_FALLBACK_PROVIDER` but deliberately
+wired no runtime failover, because silently switching provider mid-run
+would record a `producer` that did not produce the artifact and would hide
+a failing primary behind a quiet success. The free tiers have since made
+the cost of that decision concrete: a rate-limited OmniRoute gateway
+stopped three consecutive phases from running end to end at all.
+
+**Decision.** A `FailoverLLMProvider` walks an ordered chain —
+**OmniRoute → OpenRouter → Gemini** — under five constraints:
+
+1. **Opt-in.** Only `LLM_PROVIDER=failover` builds a chain. Declaring
+   `LLM_FALLBACK_PROVIDER` still changes nothing about which provider is
+   built, so a config key can never silently alter lineage. The Phase 5
+   test asserting exactly that is unchanged and still passes.
+2. **Deterministic order.** Read once from `LLM_PROVIDER_ORDER`; never
+   shuffled, load balanced, or reordered by observed latency.
+3. **Bounded.** The chain length *is* the attempt count. Each member is
+   attempted once — the chain pins `max_retries=0` on its members, because
+   three providers each retrying three times is nine requests against the
+   rate-limited tiers this exists to route around.
+4. **Transient only.** 429/5xx/timeouts/connection failures continue;
+   400/401/403/404 stop the chain and report the real problem. A wrong key
+   is not an outage, and turning one clear "your credential is invalid"
+   into three vague failures is worse than failing.
+5. **Truthful lineage.** `describe` reports the provider that *answered*,
+   plus `fallback_from` when it was not the primary, so a fallback run can
+   never read as a clean primary run. Before anything answers, the chain
+   names itself rather than guessing at its primary.
+
+**Consequences.** `OpenRouterLLMProvider` and `OmniRouteLLMProvider` do
+NOT exist: both endpoints speak the OpenAI wire format, so OpenRouter cost
+one base URL and one key (ADR-5.1), and the exact-match test forbidding
+per-vendor modules still holds with `failover.py` — which contains no URL,
+no key and no wire format — as its only addition.
+
+One pre-existing classifier defect had to be fixed for rule 4 to hold:
+litellm collapses several HTTP statuses into a generic `APIError`, which
+was classified transient to stay safe. Measured here, an HTTP **403 was
+therefore transient**, so in a chain a forbidden key would be retried at
+two more vendors. Both providers now read `status_code` first and fall
+back to the class name only when there is none.

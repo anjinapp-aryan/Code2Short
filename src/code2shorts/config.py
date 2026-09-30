@@ -93,6 +93,7 @@ class Settings(BaseSettings):
             "llm_api_key": ("OMNI_ROUTE_LLM_API_KEY", "OMNIROUTE_API_KEY", "LLM_API_KEY"),
             "gemini_api_key": ("GEMINI_API_KEY",),
             "xai_api_key": ("XAI_API_KEY",),
+            "openrouter_api_key": ("OPENROUTER_API_KEY",),
             "llm_base_url": ("OMNI_ROUTE_LLM_BASE_URL", "OMNIROUTE_BASE_URL", "LLM_BASE_URL"),
         }
         available = _readable_environment(self.environment)
@@ -158,7 +159,15 @@ class Settings(BaseSettings):
     # listed first and therefore wins.
     llm_provider: str = Field(
         default="mock",
-        validation_alias=AliasChoices("CODE2SHORTS_LLM_PROVIDER", "LLM_PROVIDER"),
+        # `LLM_PRIMARY_PROVIDER` is accepted as a synonym because that is
+        # the name the failover configuration reads naturally: with
+        # LLM_PROVIDER=failover the chain's first entry IS the primary.
+        validation_alias=AliasChoices(
+            "CODE2SHORTS_LLM_PROVIDER",
+            "CODE2SHORTS_LLM_PRIMARY_PROVIDER",
+            "LLM_PROVIDER",
+            "LLM_PRIMARY_PROVIDER",
+        ),
     )
     llm_model: str = Field(
         default="llama3.1",
@@ -212,10 +221,11 @@ class Settings(BaseSettings):
     )
 
     # Declared so production can state its intent and be validated for it.
-    # NOTE: no automatic runtime failover is wired in — see
-    # docs/PHASE_5_PROVIDER_CONFIGURATION.md. Silently switching provider
-    # mid-run would change an artifact's recorded producer and hide a
-    # failing primary, which is a bigger decision than a config key.
+    # Declaring a fallback still does NOT change which provider is built —
+    # that would let a config key silently alter an artifact's recorded
+    # producer. Automatic failover is opt-in via LLM_PROVIDER=failover,
+    # which builds an explicit chain; see ADR-5.14 and
+    # docs/PHASE_5_PROVIDER_CONFIGURATION.md.
     llm_fallback_provider: str | None = Field(
         default=None,
         validation_alias=AliasChoices(
@@ -230,6 +240,33 @@ class Settings(BaseSettings):
     gemini_model: str = Field(
         default="gemini-1.5-flash",
         validation_alias=AliasChoices("CODE2SHORTS_GEMINI_MODEL", "GEMINI_MODEL"),
+    )
+
+    # OpenRouter needs no provider class either, for the same reason
+    # (ADR-5.1): openrouter.ai/api/v1 is an OpenAI-compatible endpoint, so
+    # it is one base_url and one key. Its own key is separate from
+    # `llm_api_key` so OmniRoute and OpenRouter can both be configured at
+    # once, which is the whole point of the failover chain.
+    openrouter_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "CODE2SHORTS_OPENROUTER_API_KEY", "OPENROUTER_API_KEY"
+        ),
+    )
+    openrouter_model: str = Field(
+        default="meta-llama/llama-3.1-8b-instruct:free",
+        validation_alias=AliasChoices(
+            "CODE2SHORTS_OPENROUTER_MODEL", "OPENROUTER_MODEL"
+        ),
+    )
+
+    # The failover order, deterministic and configurable but never
+    # reordered at runtime. Read only when LLM_PROVIDER=failover.
+    llm_provider_order: str = Field(
+        default="omniroute,openrouter,gemini",
+        validation_alias=AliasChoices(
+            "CODE2SHORTS_LLM_PROVIDER_ORDER", "LLM_PROVIDER_ORDER"
+        ),
     )
 
     # xAI/Grok needs no provider class: api.x.ai speaks the OpenAI wire
@@ -329,6 +366,7 @@ class ConfigurationError(Exception):
 # actually set. `mock` is absent on purpose: it needs nothing.
 PROVIDER_CREDENTIALS: dict[str, tuple[str, str]] = {
     "gemini": ("gemini_api_key", "GEMINI_API_KEY"),
+    "openrouter": ("openrouter_api_key", "OPENROUTER_API_KEY"),
     "xai": ("xai_api_key", "XAI_API_KEY"),
     "grok": ("xai_api_key", "XAI_API_KEY"),
 }
@@ -359,7 +397,28 @@ def validate_configuration(settings: Settings | None = None) -> Settings:
         if not reveal(getattr(settings, field)):
             raise ConfigurationError(f"{variable} is required when {role}")
 
-    if provider in PROVIDER_CREDENTIALS:
+    if provider == "failover":
+        # A chain needs SOME member, not any particular one - that is the
+        # whole point of skipping the unconfigured. Checked here so the
+        # failure arrives at startup rather than after Maven, JUnit and a
+        # full JVM trace have already run.
+        from code2shorts.ai.providers.factory import (
+            DEFAULT_PROVIDER_ORDER,
+            is_provider_configured,
+        )
+
+        order = [
+            part.strip().lower()
+            for part in (settings.llm_provider_order or "").split(",")
+            if part.strip()
+        ] or list(DEFAULT_PROVIDER_ORDER)
+        if not any(is_provider_configured(settings, name) for name in order):
+            raise ConfigurationError(
+                "LLM_PROVIDER=failover but no provider in the chain is "
+                "configured. Set at least one of CODE2SHORTS_LLM_API_KEY, "
+                "CODE2SHORTS_OPENROUTER_API_KEY or CODE2SHORTS_GEMINI_API_KEY."
+            )
+    elif provider in PROVIDER_CREDENTIALS:
         require(provider, f"LLM_PROVIDER={provider}")
 
     if provider in ("omniroute", "openai_compatible") and not settings.llm_base_url:

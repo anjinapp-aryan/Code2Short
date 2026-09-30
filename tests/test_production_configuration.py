@@ -410,14 +410,24 @@ def test_no_per_vendor_provider_class_was_ever_created() -> None:
     """ADR-5.1: a new OpenAI-compatible backend costs a URL, not a class."""
     import code2shorts.ai.providers as providers
 
-    for forbidden in ("GrokProvider", "XAIProvider", "OmniRouteProvider"):
+    for forbidden in (
+        "GrokProvider", "XAIProvider", "OmniRouteProvider", "OpenRouterProvider",
+        "OpenRouterLLMProvider", "OmniRouteLLMProvider",
+    ):
         assert not hasattr(providers, forbidden), f"{forbidden} must not exist"
 
     from pathlib import Path as _Path
 
     files = {p.name for p in (_Path(REPO) / "src/code2shorts/ai/providers").glob("*.py")}
-    assert files == {"__init__.py", "factory.py", "gemini.py", "mock.py",
-                     "openai_compatible.py"}, f"unexpected provider module: {files}"
+    # `failover.py` is the ONE addition, and it is not a vendor: it holds
+    # no base URL, no key and no wire format - it walks a list of providers
+    # built by the factory. Phase 6.5.4 added OpenRouter to the chain and
+    # it still cost a URL and a key rather than a module, which is the
+    # property this exact-match assertion exists to keep.
+    assert files == {"__init__.py", "factory.py", "failover.py", "gemini.py",
+                     "mock.py", "openai_compatible.py"}, (
+        f"unexpected provider module: {files}"
+    )
 
 
 @pytest.mark.parametrize(
@@ -488,7 +498,14 @@ def test_no_module_implements_automatic_provider_failover() -> None:
 
     root = _Path(REPO) / "src" / "code2shorts"
     factory = root / "ai" / "providers" / "factory.py"
+    # The web app's pipeline wiring is a COMPOSITION ROOT: it builds the
+    # provider once, at the moment a pipeline is assembled, exactly as the
+    # golden-path scripts do outside src/. That is not the thing this test
+    # forbids. What it forbids is a SECOND construction used to substitute
+    # a provider after one has failed, which is checked below.
+    composition_roots = {root / "webapp" / "pipeline.py"}
     callers: list[str] = []
+    rooted: list[ast.Call] = []
     for path in root.rglob("*.py"):
         if path == factory:
             continue
@@ -496,12 +513,34 @@ def test_no_module_implements_automatic_provider_failover() -> None:
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
                 name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
-                if name == "build_llm_provider":
-                    callers.append(f"{path.relative_to(root)}:{node.lineno}")
+                if name != "build_llm_provider":
+                    continue
+                if path in composition_roots:
+                    rooted.append(node)
+                    continue
+                callers.append(f"{path.relative_to(root)}:{node.lineno}")
     assert not callers, (
         "provider construction outside the factory seam — a failover path "
         f"may have been added without an ADR: {callers}"
     )
+
+    # A composition root builds ONCE, and never from inside an exception
+    # handler or a loop — either would be a substitution path wearing a
+    # composition root's clothes.
+    assert len(rooted) == 1, f"a composition root built the provider {len(rooted)} times"
+    for path in composition_roots:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.ExceptHandler, ast.While, ast.For)):
+                continue
+            for inner in ast.walk(node):
+                if isinstance(inner, ast.Call) and (
+                    getattr(inner.func, "id", None) == "build_llm_provider"
+                ):
+                    raise AssertionError(
+                        f"{path.name}:{inner.lineno} builds a provider inside a "
+                        "retry/handler — that is substitution, not composition"
+                    )
 
 
 def test_the_producer_recorded_on_an_artifact_names_the_real_provider() -> None:

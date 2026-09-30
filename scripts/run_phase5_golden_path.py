@@ -43,7 +43,11 @@ from code2shorts.media.audio_forensics import (  # noqa: E402
     measure_audio,
     validate_audio_experience,
 )
-from code2shorts.media.composer import AUDIO_SAMPLE_RATE  # noqa: E402
+from code2shorts.core.video_profile import VERTICAL_HD  # noqa: E402
+from code2shorts.media.composer import (  # noqa: E402
+    AUDIO_SAMPLE_RATE,
+    assemble_narration_track,
+)
 from code2shorts.media.validation import validate_final_video, validate_timeline  # noqa: E402
 from code2shorts.narration.audio import (  # noqa: E402
     BREATH_SECONDS,
@@ -390,7 +394,9 @@ def main() -> int:
 
     # --- real render ------------------------------------------------------
     started = time.perf_counter()
-    render = ManimVideoRenderer(fps=30, resolution="1080x1920", timeout_seconds=900.0).render(
+    render = ManimVideoRenderer(
+        fps=30, resolution=VERTICAL_HD.resolution, timeout_seconds=900.0
+    ).render(
         plan, out / "render",
         RenderContext(trace=trace, source_files=dict(code.source_files),
                       entry_point=code.entry_point),
@@ -402,7 +408,7 @@ def main() -> int:
 
     # --- compose + validate ----------------------------------------------
     started = time.perf_counter()
-    combined = _concat_audio(alignment, out / "narration.wav")
+    combined = assemble_narration_track(alignment, out / "narration.wav")
     # Loudness-normalise the assembled track, not the individual segments:
     # normalising each one separately would flatten the natural level
     # differences between sentences and is what makes narration sound
@@ -569,29 +575,6 @@ def _persist(out: Path, **artifacts) -> None:
                 )
         except (TypeError, ValueError, OSError) as error:
             print(f"  (could not persist {name}: {error})")
-
-
-def _concat_audio(alignment, output_path: Path) -> Path:
-    from code2shorts.execution.sandbox import run_subprocess
-
-    output_path = output_path.resolve()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    paths = [Path(s.audio_path).resolve() for s in alignment.segments]
-    command = ["ffmpeg", "-y"]
-    for path in paths:
-        command += ["-i", str(path)]
-    filters = [
-        f"[{i}:a]adelay={int(s.start_seconds*1000)}|{int(s.start_seconds*1000)}[a{i}]"
-        for i, s in enumerate(alignment.segments)
-    ]
-    filters.append("".join(f"[a{i}]" for i in range(len(paths)))
-                   + f"amix=inputs={len(paths)}:normalize=0[out]")
-    command += ["-filter_complex", ";".join(filters), "-map", "[out]",
-                "-t", f"{alignment.total_duration_seconds:.3f}", str(output_path)]
-    result = run_subprocess(command, cwd=output_path.parent, timeout_seconds=300.0)
-    if result.timed_out or result.returncode != 0:
-        raise RuntimeError(f"audio concat failed: {result.stderr[-1000:]}")
-    return output_path
 
 
 if __name__ == "__main__":
