@@ -35,6 +35,9 @@ class ArtifactType(StrEnum):
     FINAL_VIDEO = "final_video"
     """rendered_video + audio, composed by MediaComposer. The end of the
     lineage chain — see ARCHITECTURE_DECISIONS.md Phase 4."""
+    SUBTITLES = "subtitles"
+    """Phase 8.1: the SRT written from the narration alignment, so the web
+    path carries the same subtitle file the golden path always wrote."""
 
 
 def _checksum(content: dict[str, Any]) -> str:

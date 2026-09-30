@@ -1,0 +1,38 @@
+{# Shell: fixed sidebar, one content column. Deliberately not a
+   dashboard grid - the product has a workflow, not a set of widgets. #}
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Code2Shorts{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/">
+    <span class="brand-mark" aria-hidden="true">C2</span>
+    <span class="brand-name">Code2Shorts</span>
+  </a>
+  <div class="topbar-actions">
+    <a class="topbar-link" href="/settings">Settings</a>
+  </div>
+</header>
+
+<div class="shell">
+  <nav class="sidebar" aria-label="Main">
+    <a href="/"        class="nav {% if nav == 'home' %}is-active{% endif %}">Home</a>
+    <a href="/videos"  class="nav {% if nav == 'videos' or nav == 'video' %}is-active{% endif %}">Videos</a>
+    <a href="/create"  class="nav {% if nav == 'create' or nav == 'review' %}is-active{% endif %}">Create</a>
+    <a href="/jobs"    class="nav {% if nav == 'jobs' or nav == 'job' %}is-active{% endif %}">Jobs</a>
+    <a href="/settings" class="nav {% if nav == 'settings' %}is-active{% endif %}">Settings</a>
+  </nav>
+
+  <main class="content">
+    {% block content %}{% endblock %}
+  </main>
+</div>
+
+{% block scripts %}{% endblock %}
+</body>
+</html>

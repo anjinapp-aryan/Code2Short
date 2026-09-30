@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Settings · Code2Shorts{% endblock %}
+
+{% block content %}
+<div class="page-head"><h1>Settings</h1></div>
+<p class="lede">Read-only. Configuration is server-side and is never
+   editable from a browser.</p>
+
+<dl class="summary">
+  <div><dt>LLM provider</dt><dd>{{ llm_provider }}</dd></div>
+  <div><dt>Renderer version</dt><dd>{{ renderer_version }}</dd></div>
+  <div><dt>Library</dt><dd><code>{{ library_root }}</code></dd></div>
+</dl>
+
+<h2 class="section-title">Credentials</h2>
+{# Presence only. A settings page is a classic place for a key to end up
+   in a screenshot, so no value is ever rendered. #}
+<ul class="creds">
+  {% for name, present in credentials.items() %}
+    <li><span class="dot {% if present %}dot-on{% endif %}"></span>{{ name }}
+        <span class="cred-state">{{ 'configured' if present else 'not configured' }}</span></li>
+  {% endfor %}
+</ul>
+{% endblock %}

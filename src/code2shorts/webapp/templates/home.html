@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% from "_macros.html" import video_card, status_pill %}
+{% block title %}Code2Shorts{% endblock %}
+
+{% block content %}
+<section class="hero">
+  <div>
+    <h1>Turn a Java program into a teaching video</h1>
+    <p class="lede">Every frame comes from a real JVM execution, not from a
+       description of one.</p>
+  </div>
+  <a class="btn btn-primary btn-lg" href="/create">+ Create Video</a>
+</section>
+
+{% if jobs %}
+<section class="section">
+  <h2 class="section-title">Current jobs</h2>
+  <ul class="joblist">
+    {% for job in jobs %}
+    <li class="jobrow">
+      <a href="/jobs/{{ job.id }}" class="jobrow-name">{{ job.title or job.algorithm }}</a>
+      {{ status_pill(job.status.value) }}
+      <div class="bar" role="progressbar" aria-valuenow="{{ job.progress }}"
+           aria-valuemin="0" aria-valuemax="100">
+        <div class="bar-fill" style="width: {{ job.progress }}%"></div>
+      </div>
+      <span class="jobrow-pct">{{ job.progress }}%</span>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+<section class="section">
+  <h2 class="section-title">Recent videos</h2>
+  <div class="cards">
+    {% for row in rows %}{{ video_card(row) }}{% endfor %}
+  </div>
+</section>
+{% endblock %}

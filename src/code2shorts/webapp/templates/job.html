@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% from "_macros.html" import stage_list, status_pill %}
+{% block title %}Generating · Code2Shorts{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>{{ job.title or job.algorithm }}</h1>
+  {{ status_pill(job.status.value) }}
+</div>
+
+<p class="lede" id="headline">Generating your teaching video…</p>
+
+{# Every value below is replaced by the poller from real backend state.
+   Nothing here animates on a timer. #}
+<div class="job" data-job="{{ job.id }}">
+  <div class="bar bar-lg" role="progressbar" id="bar"
+       aria-valuenow="{{ job.progress }}" aria-valuemin="0" aria-valuemax="100">
+    <div class="bar-fill" id="bar-fill" style="width: {{ job.progress }}%"></div>
+  </div>
+  <p class="job-pct"><span id="pct">{{ job.progress }}</span>% complete</p>
+
+  <div id="stages">{{ stage_list(job.stages) }}</div>
+
+  <div class="job-actions">
+    <button class="btn btn-ghost" type="button" id="toggle-logs">View logs</button>
+    <button class="btn btn-ghost" type="button" id="cancel">Cancel</button>
+    <a class="btn btn-primary is-hidden" id="watch" href="#">Watch video</a>
+  </div>
+
+  <pre class="logs is-hidden" id="logs" aria-live="polite"></pre>
+</div>
+{% endblock %}
+
+{% block scripts %}<script src="/static/job.js"></script>{% endblock %}

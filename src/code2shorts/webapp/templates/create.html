@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}Create · Code2Shorts{% endblock %}
+
+{% block content %}
+<div class="page-head"><h1>Create video</h1></div>
+
+<form method="post" action="/create/review" class="wizard">
+  <section class="step">
+    <div class="step-index">1</div>
+    <div class="step-body">
+      <h2>Program</h2>
+      <p class="hint">Phase 7.0 ships one program end to end. More follow
+         once this flow is settled.</p>
+      <div class="choices">
+        {% for program in programs %}
+        <label class="choice {% if program.slug == selected.slug %}is-selected{% endif %}">
+          <input type="radio" name="program" value="{{ program.slug }}"
+                 {% if program.slug == selected.slug %}checked{% endif %}>
+          <span class="choice-title">{{ program.title }}</span>
+          <span class="choice-sub">{{ program.summary }}</span>
+          <code class="choice-io">input {{ program.input_value }} → {{ program.expected_output }}</code>
+        </label>
+        {% endfor %}
+      </div>
+    </div>
+  </section>
+
+  <section class="step">
+    <div class="step-index">2</div>
+    <div class="step-body">
+      <h2>Teaching configuration</h2>
+      <div class="fields">
+        <label class="field">
+          <span>Audience</span>
+          <select name="audience">
+            {% for value in audiences %}
+              <option value="{{ value }}">{{ value|replace('_',' ')|capitalize }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="field">
+          <span>Teaching style</span>
+          <select name="teaching_style">
+            {% for value in styles %}
+              <option value="{{ value }}">{{ value|replace('_',' ')|capitalize }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="field">
+          <span>Narration voice</span>
+          <select name="voice">
+            {% for value in voices %}<option value="{{ value }}">{{ value }}</option>{% endfor %}
+          </select>
+        </label>
+        <label class="field">
+          <span>Format</span>
+          <input type="text" value="YouTube Short · 1080 × 1920" disabled>
+        </label>
+      </div>
+
+      <details class="advanced">
+        <summary>Advanced settings</summary>
+        <p class="hint">Renderer, LLM provider, retry and timeout come from
+           server configuration and are shown on the Settings page. They are
+           deliberately not editable from a browser.</p>
+      </details>
+    </div>
+  </section>
+
+  <section class="step">
+    <div class="step-index">3</div>
+    <div class="step-body">
+      <h2>Review</h2>
+      <p class="hint">Nothing is generated yet. The next screen shows what
+         will run and whether a matching video already exists.</p>
+      <button class="btn btn-primary btn-lg" type="submit">Continue to review</button>
+    </div>
+  </section>
+</form>
+{% endblock %}

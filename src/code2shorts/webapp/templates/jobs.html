@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% from "_macros.html" import status_pill %}
+{% block title %}Jobs · Code2Shorts{% endblock %}
+
+{% block content %}
+<div class="page-head"><h1>Jobs</h1></div>
+
+{% if jobs %}
+<table class="table">
+  <thead><tr><th>Program</th><th>Status</th><th>Progress</th><th>Version</th><th></th></tr></thead>
+  <tbody>
+  {% for job in jobs %}
+    <tr>
+      <td>{{ job.title or job.algorithm }}</td>
+      <td>{{ status_pill(job.status.value) }}</td>
+      <td>
+        <div class="bar bar-sm"><div class="bar-fill" style="width: {{ job.progress }}%"></div></div>
+      </td>
+      <td>{% if job.version %}v{{ job.version }}{% else %}—{% endif %}</td>
+      <td><a class="link" href="/jobs/{{ job.id }}">Open</a></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+  <p class="empty">No generation jobs yet.</p>
+{% endif %}
+{% endblock %}

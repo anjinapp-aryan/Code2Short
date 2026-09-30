@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}Review · Code2Shorts{% endblock %}
+
+{% block content %}
+<div class="page-head"><h1>Review</h1></div>
+
+{% if not decision.should_generate %}
+  {# The duplicate guard, surfaced. No work has been done and none will
+     be unless the user explicitly asks for it. #}
+  <div class="notice notice-info">
+    <h2>{{ decision.reason }}</h2>
+    <p>Generating again would spend several minutes of compute to produce
+       the same video.</p>
+    <div class="notice-actions">
+      <a class="btn btn-primary" href="/videos/{{ selected.slug }}/v{{ decision.existing.version }}">Watch existing</a>
+      <form method="post" action="/create/start" class="inline">
+        <input type="hidden" name="program" value="{{ selected.slug }}">
+        <input type="hidden" name="audience" value="{{ config.audience }}">
+        <input type="hidden" name="teaching_style" value="{{ config.teaching_style }}">
+        <input type="hidden" name="voice" value="{{ config.voice }}">
+        <input type="hidden" name="force" value="1">
+        <button class="btn btn-ghost" type="submit">Re-generate anyway</button>
+      </form>
+    </div>
+  </div>
+{% elif decision.changed %}
+  <div class="notice notice-warn">
+    <h2>{{ decision.reason }}</h2>
+    <p>Changed since v{{ decision.existing.version }}:
+       {% for field in decision.changed %}<code>{{ field }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</p>
+  </div>
+{% endif %}
+
+<div class="review-grid">
+  <dl class="summary">
+    <div><dt>Program</dt><dd>{{ selected.title }}</dd></div>
+    <div><dt>Input</dt><dd><code>{{ selected.input_value }}</code></dd></div>
+    <div><dt>Audience</dt><dd>{{ config.audience|replace('_',' ')|capitalize }}</dd></div>
+    <div><dt>Teaching style</dt><dd>{{ config.teaching_style|replace('_',' ')|capitalize }}</dd></div>
+    <div><dt>Voice</dt><dd>{{ config.voice }}</dd></div>
+    <div><dt>Format</dt><dd>1080 × 1920</dd></div>
+    <div><dt>LLM provider</dt><dd>{{ llm_provider }}</dd></div>
+  </dl>
+
+  <div class="pipeline-preview">
+    <h2>Pipeline</h2>
+    <ol class="stages">
+      {% for label in stages %}
+      <li class="stage stage-queued">
+        <span class="stage-mark" aria-hidden="true"></span>
+        <span class="stage-label">{{ label }}</span>
+      </li>
+      {% endfor %}
+    </ol>
+  </div>
+</div>
+
+<form method="post" action="/create/start" class="review-submit">
+  <input type="hidden" name="program" value="{{ selected.slug }}">
+  <input type="hidden" name="audience" value="{{ config.audience }}">
+  <input type="hidden" name="teaching_style" value="{{ config.teaching_style }}">
+  <input type="hidden" name="voice" value="{{ config.voice }}">
+  <button class="btn btn-primary btn-lg" type="submit">
+    {% if decision.should_generate %}Generate video{% else %}Watch existing{% endif %}
+  </button>
+  <a class="btn btn-ghost" href="/create?program={{ selected.slug }}">Back</a>
+</form>
+{% endblock %}
