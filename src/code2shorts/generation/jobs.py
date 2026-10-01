@@ -60,6 +60,12 @@ class Job(BaseModel):
     id: str
     algorithm: str
     title: str
+    video_format: str = ""
+    """The request's `TeachingConfig.video_format`, recorded per job so two
+    jobs for one program in different formats stay distinguishable."""
+    request_digest: str = ""
+    """The request fingerprint's digest: what makes two requests the same
+    video (and therefore the same job)."""
     status: GenerationStatus = GenerationStatus.QUEUED
     stages: list[Stage]
     version: int | None = None
@@ -134,15 +140,20 @@ class JobManager:
     def start(self, request: GenerationRequest, force: bool = False) -> Job:
         """Begin a generation in the background.
 
-        Refuses a second concurrent job for the same program. Two renders
-        of one algorithm would race for the same version directory and
-        fight over Maven and FFmpeg on the same machine.
+        Refuses a second concurrent job for the SAME REQUEST (same request
+        fingerprint): it would produce the same video twice. Different
+        requests for one program - 9:16 and 16:9, say - are different
+        videos and each gets its own job; since Phase 8.1 the registry
+        allocates each its own version directory atomically, so they no
+        longer race for one. Deduplicating by program alone handed a 16:9
+        request the running 9:16 job (Phase 8.2D).
         """
+        digest = self._manager.fingerprint(request).digest
         # Check and insert under ONE lock hold: checked outside it, two
         # simultaneous clicks could both see "no job" and both start one.
         with self._lock:
             for running in self._jobs.values():
-                if running.algorithm == request.algorithm and running.status in (
+                if running.request_digest == digest and running.status in (
                     GenerationStatus.QUEUED,
                     GenerationStatus.RUNNING,
                 ):
@@ -152,6 +163,8 @@ class JobManager:
                 id=uuid.uuid4().hex,
                 algorithm=request.algorithm,
                 title=request.title,
+                video_format=request.config.video_format,
+                request_digest=digest,
                 stages=[
                     Stage(name=name, label=label) for name, label in STAGE_LABELS.items()
                 ],

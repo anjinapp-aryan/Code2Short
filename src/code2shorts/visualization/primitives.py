@@ -15,7 +15,9 @@ visualization library.
 from __future__ import annotations
 
 from code2shorts.core.models import SourceLocation
+from code2shorts.core.video_profile import Orientation
 from code2shorts.visualization.code_state import CodeState, build_code_state
+from code2shorts.visualization.layout import CompositionLayout
 from code2shorts.visualization.state import FrameState
 
 # 9:16 teaching layout, for the REAL frame: 4.5 units wide x 8 tall.
@@ -229,8 +231,11 @@ def _lit(value: object) -> str:
     return repr(value)
 
 
-def array_row(state: FrameState, var: str = "arr_group") -> list[str]:
+def array_row(
+    state: FrameState, var: str = "arr_group", layout: CompositionLayout | None = None
+) -> list[str]:
     """Array cells as labelled tiles, with index labels beneath."""
+    layout = layout or PORTRAIT
     array = state.primary_array
     if array is None or not array.cells:
         return [f"{var} = VGroup()"]
@@ -272,23 +277,32 @@ def array_row(state: FrameState, var: str = "arr_group") -> list[str]:
         f"{var}.scale({scale:.4f})",
         # Long arrays must stay inside the safe area rather than run
         # off the frame edges.
-        f"if {var}.width > {SAFE_WIDTH}: {var}.scale_to_fit_width({SAFE_WIDTH})",
-        f"{var}.move_to([0, {ARRAY_Y}, 0])",
+        f"if {var}.width > {layout.structure_width}: "
+        f"{var}.scale_to_fit_width({layout.structure_width})",
+        f"{var}.move_to([{layout.structure_x}, {layout.array_y}, 0])",
     ]
     return lines
 
 
-def pointer_arrows(state: FrameState, array_var: str = "arr_group", var: str = "ptr_group") -> list[str]:
+def pointer_arrows(
+    state: FrameState,
+    array_var: str = "arr_group",
+    var: str = "ptr_group",
+    layout: CompositionLayout | None = None,
+) -> list[str]:
     """One labelled arrow per scalar currently addressing a cell.
 
     Multiple pointers on the same cell are stacked vertically so their
     labels never overlap — this is what keeps `left`/`right` legible when
     they converge, and it generalises to any number of pointers.
     """
+    layout = layout or PORTRAIT
     array = state.primary_array
     pointers = state.pointers
     if array is None or not pointers:
         return [f"{var} = VGroup()"]
+    if layout.separate_pointer_labels:
+        return _separated_pointer_arrows(state, array_var, var, layout)
 
     by_index: dict[int, list[str]] = {}
     for pointer in pointers:
@@ -324,9 +338,83 @@ def pointer_arrows(state: FrameState, array_var: str = "arr_group", var: str = "
     return lines
 
 
-def scalar_panel(state: FrameState, var: str = "vars_group") -> list[str]:
+POINTER_LEVEL_STEP = 0.34
+"""Vertical distance between stacked pointer-label levels; the same step
+`pointer_arrows` already uses for pointers converged on one cell."""
+
+
+def _separated_pointer_arrows(
+    state: FrameState, array_var: str, var: str, layout: CompositionLayout
+) -> list[str]:
+    """Pointer labels that never overlap, for layouts that ask for it.
+
+    Same labels, same colours, same one-arrow-per-cell rule as
+    `pointer_arrows`. Two things are added, both purely geometric:
+
+      * a label is kept inside the state column, so a pointer on an edge
+        cell cannot push its label past the safe area;
+      * labels are placed in index order, and a label that would overlap
+        one already placed - two pointers on ADJACENT cells, whose labels
+        are wider than a cell - is lifted one level at a time until it is
+        clear.
+
+    The arrow is drawn from a cell's lowest label to that cell afterwards,
+    so a lifted or clamped label still points at the cell it names.
+    Deterministic: the same frame always produces the same placement.
+    """
+    array = state.primary_array
+    by_index: dict[int, list[str]] = {}
+    for pointer in state.pointers:
+        by_index.setdefault(pointer.index, []).append(pointer.name)
+
+    column_left = layout.structure_x - layout.structure_width / 2
+    column_right = layout.structure_x + layout.structure_width / 2
+    lines = [
+        f"{var} = VGroup()",
+        # Axis-aligned boxes overlap, with a small horizontal clearance.
+        "_overlaps = lambda a, b: ("
+        "a.get_left()[0] < b.get_right()[0] + 0.04 and "
+        "b.get_left()[0] < a.get_right()[0] + 0.04 and "
+        "a.get_bottom()[1] < b.get_top()[1] and "
+        "b.get_bottom()[1] < a.get_top()[1])",
+        "_placed = []",
+    ]
+    counter = 0
+    lowest: list[tuple[int, int]] = []  # (label counter, array index) of each cell's lowest label
+    for index, names in sorted(by_index.items()):
+        for depth, name in enumerate(sorted(names)):
+            offset = 0.30 + depth * POINTER_LEVEL_STEP
+            lines += [
+                f"_cell_{counter} = {array_var}[{index}]",
+                f"_lbl_{counter} = Text({_lit(name)}, font_size={POINTER_FONT_SIZE}, color=YELLOW)",
+                f"_lbl_{counter}.next_to(_cell_{counter}, UP, buff={offset:.2f})",
+                f"if _lbl_{counter}.get_right()[0] > {column_right:.3f}: "
+                f"_lbl_{counter}.shift(LEFT * (_lbl_{counter}.get_right()[0] - {column_right:.3f}))",
+                f"if _lbl_{counter}.get_left()[0] < {column_left:.3f}: "
+                f"_lbl_{counter}.shift(RIGHT * ({column_left:.3f} - _lbl_{counter}.get_left()[0]))",
+                f"while any(_overlaps(_lbl_{counter}, _p) for _p in _placed): "
+                f"_lbl_{counter}.shift(UP * {POINTER_LEVEL_STEP})",
+                f"_placed.append(_lbl_{counter})",
+            ]
+            if depth == 0:
+                lowest.append((counter, index))
+            counter += 1
+    for label, _index in lowest:
+        lines += [
+            f"_arw_{label} = Arrow(start=_lbl_{label}.get_bottom(), "
+            f"end=_cell_{label}.get_top(), buff=0.05, stroke_width=4, color=YELLOW)",
+            f"{var}.add(_arw_{label})",
+        ]
+    lines.append(f"{var}.add(*_placed)")
+    return lines
+
+
+def scalar_panel(
+    state: FrameState, var: str = "vars_group", layout: CompositionLayout | None = None
+) -> list[str]:
     """Non-array variables and their current values, deterministically
     ordered (sorted by name) so the same trace always lays out identically."""
+    layout = layout or PORTRAIT
     if not state.scalars:
         return [f"{var} = VGroup()"]
     parts = [f"{name} = {value}" for name, value in sorted(state.scalars.items())]
@@ -335,8 +423,9 @@ def scalar_panel(state: FrameState, var: str = "vars_group") -> list[str]:
         f"{var} = Text({_lit(text)}, font_size={SCALAR_FONT_SIZE}, color=BLUE_B)",
         # Long value sets (an array printed as a scalar, many variables)
         # must shrink rather than run off a 4.5-unit-wide frame.
-        f"if {var}.width > {SAFE_WIDTH}: {var}.scale_to_fit_width({SAFE_WIDTH})",
-        f"{var}.move_to([0, {SCALARS_Y}, 0])",
+        f"if {var}.width > {layout.structure_width}: "
+        f"{var}.scale_to_fit_width({layout.structure_width})",
+        f"{var}.move_to([{layout.scalars_x}, {layout.scalars_y}, 0])",
     ]
 
 
@@ -366,7 +455,9 @@ def _dedent_window(lines: list[str]) -> list[str]:
     return [text[common:] if text.strip() else text for text in lines]
 
 
-def code_panel(state: CodeState, var: str = "code_group") -> list[str]:
+def code_panel(
+    state: CodeState, var: str = "code_group", layout: CompositionLayout | None = None
+) -> list[str]:
     """Source window with the executing line highlighted.
 
     Manim's `Code` mobject is used as the SYNTAX HIGHLIGHTER (the reason no
@@ -397,6 +488,7 @@ def code_panel(state: CodeState, var: str = "code_group") -> list[str]:
     `.line_no_from`) that do not exist in the 0.21 we run - verified, see
     the Phase 4.3 reuse audit.
     """
+    layout = layout or PORTRAIT
     if not state.lines:
         return [f"{var} = VGroup()"]
 
@@ -439,7 +531,7 @@ def code_panel(state: CodeState, var: str = "code_group") -> list[str]:
         "_rep_body = max((_code_left_x + _rep) - _left_x, 1e-6)",
         "",
         # --- scale from the representative width -------------------------
-        f"_content_w = {CODE_MAX_WIDTH} - 2 * {PANEL_PAD_X}",
+        f"_content_w = {layout.code_max_width} - 2 * {PANEL_PAD_X}",
         "_body.scale(_content_w / _rep_body, about_point=_body.get_left())",
         "",
         # --- outliers shrink individually, never the whole block ---------
@@ -468,8 +560,8 @@ def code_panel(state: CodeState, var: str = "code_group") -> list[str]:
     # Order matters: the highlight is built after this, because containment
     # can still resize the very line it boxes.
     lines += [
-        f"_view_left = {CODE_VIEWPORT_CENTER_X} - {CODE_VIEWPORT_WIDTH} / 2",
-        f"_view_right = {CODE_VIEWPORT_CENTER_X} + {CODE_VIEWPORT_WIDTH} / 2",
+        f"_view_left = {layout.code_viewport_center_x} - {layout.code_viewport_width} / 2",
+        f"_view_right = {layout.code_viewport_center_x} + {layout.code_viewport_width} / 2",
         # The body starts at the viewport's own left padding rather than
         # wherever the scaling left it, so the line-number column has a
         # fixed internal margin and cannot reach the border.
@@ -512,7 +604,7 @@ def code_panel(state: CodeState, var: str = "code_group") -> list[str]:
         # --- the panel IS the viewport ------------------------------------
         # Width and horizontal centre are constants; only the height still
         # follows the content.
-        f"_panel_w = {CODE_VIEWPORT_WIDTH}",
+        f"_panel_w = {layout.code_viewport_width}",
         # Room for the chrome strip the traffic lights sit in, so they
         # never overlap the first line of code.
         f"_panel_h = _body.height + 2 * {PANEL_PAD_Y} + {PANEL_CHROME_HEIGHT}",
@@ -523,7 +615,7 @@ def code_panel(state: CodeState, var: str = "code_group") -> list[str]:
         # Centred on the FIXED axis, not on the body. Centring it on the
         # body is what let a wide window carry the panel sideways and push
         # the line numbers out of it.
-        f"_panel.move_to([{CODE_VIEWPORT_CENTER_X}, "
+        f"_panel.move_to([{layout.code_viewport_center_x}, "
         f"_body.get_center()[1] + {PANEL_CHROME_HEIGHT} / 2, 0])",
         # The window's traffic lights. Manim drew these inside the
         # rectangle this panel replaces, and losing them would change the
@@ -544,12 +636,12 @@ def code_panel(state: CodeState, var: str = "code_group") -> list[str]:
         # became 38.8. The real height limit is the region the caption
         # leaves, which only `compose_vertical` can measure.
     ]
-    lines += repin_viewport(var)
-    lines += [f"{var}.move_to([{CODE_VIEWPORT_CENTER_X}, {CODE_Y}, 0])"]
+    lines += repin_viewport(var, layout)
+    lines += [f"{var}.move_to([{layout.code_viewport_center_x}, {layout.code_y}, 0])"]
     return lines
 
 
-def repin_viewport(var: str) -> list[str]:
+def repin_viewport(var: str, layout: CompositionLayout | None = None) -> list[str]:
     """Restore the FIXED viewport after a uniform scale, as Manim source.
 
     A uniform `scale_to_fit_height` shrinks the panel along with the code,
@@ -563,10 +655,11 @@ def repin_viewport(var: str) -> list[str]:
     submobjects by index, which is a contract `code_panel` states where it
     builds them.
     """
+    layout = layout or PORTRAIT
     return [
         f"_p = {var}.submobjects[0]",
-        f"_p.stretch_to_fit_width({CODE_VIEWPORT_WIDTH})",
-        f"_p.move_to([{CODE_VIEWPORT_CENTER_X}, _p.get_center()[1], 0])",
+        f"_p.stretch_to_fit_width({layout.code_viewport_width})",
+        f"_p.move_to([{layout.code_viewport_center_x}, _p.get_center()[1], 0])",
         f"_dx = (_p.get_left()[0] + {PANEL_PAD_X}) "
         f"- {var}.submobjects[2].get_left()[0]",
         f"for _m in ({var}.submobjects[2], {var}.submobjects[3]):",
@@ -599,11 +692,51 @@ CODE_HEIGHT_BUDGET = 2.60               # conservative composed height: the
                                         # depending on caption length
 
 
+# The portrait composition as a layout value. Every field IS one of the
+# constants above - not a copy of its number - so the portrait scene the
+# primitives emit through this value is the one they emitted from the
+# constants directly. The x positions are the integer 0 the source always
+# wrote literally, so the generated text is unchanged character for
+# character.
+PORTRAIT = CompositionLayout(
+    name="portrait",
+    orientation=Orientation.PORTRAIT,
+    composition_implemented=True,
+    frame_width=FRAME_WIDTH,
+    frame_height=FRAME_HEIGHT,
+    safe_width=SAFE_WIDTH,
+    safe_top=SAFE_TOP,
+    safe_bottom=SAFE_BOTTOM,
+    title_x=0,
+    title_y=TITLE_Y,
+    scalars_x=0,
+    scalars_y=SCALARS_Y,
+    structure_x=0,
+    structure_width=SAFE_WIDTH,
+    structure_top=STRUCTURE_TOP,
+    structure_max_height=STRUCTURE_MAX_HEIGHT,
+    array_y=ARRAY_Y,
+    caption_x=0,
+    caption_y=CAPTION_Y,
+    caption_width=SAFE_WIDTH,
+    caption_chars_per_line=CAPTION_CHARS_PER_LINE,
+    caption_max_lines=CAPTION_MAX_LINES,
+    caption_max_height=CAPTION_MAX_HEIGHT,
+    band_gap=BAND_GAP,
+    code_y=CODE_Y,
+    code_max_width=CODE_MAX_WIDTH,
+    code_viewport_width=CODE_VIEWPORT_WIDTH,
+    code_viewport_center_x=CODE_VIEWPORT_CENTER_X,
+    code_height_budget=CODE_HEIGHT_BUDGET,
+)
+
+
 def fit_window_radius(
     location: SourceLocation,
     source_files: dict[str, str],
     minimum: int,
     maximum: int = MAX_WINDOW_RADIUS,
+    layout: CompositionLayout | None = None,
 ) -> int:
     """How many lines of context this canvas can actually afford to show.
 
@@ -623,6 +756,7 @@ def fit_window_radius(
     Purely a function of the source text's shape — no algorithm, no file
     name, no step kind reaches this.
     """
+    layout = layout or PORTRAIT
     if location.file is None or location.file not in source_files:
         return minimum
 
@@ -635,7 +769,7 @@ def fit_window_radius(
         # and the fitter under-reports how much context fits.
         drawn = _dedent_window(state.lines)
         widest = max((len(text) for text in drawn), default=1) + CODE_GUTTER_CHARS
-        return len(state.lines), CODE_LINE_ASPECT * SAFE_WIDTH / max(widest, 1)
+        return len(state.lines), CODE_LINE_ASPECT * layout.code_max_width / max(widest, 1)
 
     # The size the text is ALREADY going to be. Where a single long source
     # line has already pushed this window below the target, refusing to
@@ -659,13 +793,13 @@ def fit_window_radius(
         # already was: one wider line entering the window costs every line.
         if line_height < acceptable:
             break
-        if count * line_height > CODE_HEIGHT_BUDGET:
+        if count * line_height > layout.code_height_budget:
             break
         # Even at the guaranteed floor these lines must fit the region.
         # Without this the fitter could add context that the composer then
         # has to shrink below the floor to fit — growth that costs
         # readability is not growth.
-        if count * ABS_MIN_CODE_LINE_HEIGHT_UNITS > CODE_HEIGHT_BUDGET:
+        if count * ABS_MIN_CODE_LINE_HEIGHT_UNITS > layout.code_height_budget:
             break
         best = radius
     return best
@@ -675,6 +809,7 @@ def compose_vertical(
     anchor_vars: list[str],
     caption_var: str = "caption",
     code_var: str | None = "code_group",
+    layout: CompositionLayout | None = None,
 ) -> list[str]:
     """Give the code panel every unit of vertical space nothing else needs.
 
@@ -695,22 +830,25 @@ def compose_vertical(
     caption simply keeps its band, and with no code panel the caption is
     centred in the space that remains.
     """
+    layout = layout or PORTRAIT
     lines: list[str] = []
 
     # Where the composable region starts: under whatever the step drew
     # above it, or at the caption's own band if it drew nothing.
     if anchor_vars:
         tops = ", ".join(f"{name}.get_bottom()[1]" for name in anchor_vars)
-        lines.append(f"_avail_top = min([{tops}]) - {BAND_GAP}")
+        lines.append(f"_avail_top = min([{tops}]) - {layout.band_gap}")
     else:
-        lines.append(f"_avail_top = {CAPTION_Y} + {CAPTION_MAX_HEIGHT / 2:.3f}")
-    lines.append(f"_avail_top = min(_avail_top, {SAFE_TOP})")
+        lines.append(
+            f"_avail_top = {layout.caption_y} + {layout.caption_max_height / 2:.3f}"
+        )
+    lines.append(f"_avail_top = min(_avail_top, {layout.safe_top})")
 
     if code_var is None:
         # No code this step: centre the caption in the whole remainder
         # rather than leaving the lower half of the frame empty.
         lines += [
-            f"{caption_var}.move_to([0, (_avail_top + {SAFE_BOTTOM}) / 2, 0])",
+            f"{caption_var}.move_to([0, (_avail_top + {layout.safe_bottom}) / 2, 0])",
         ]
         return lines
 
@@ -719,20 +857,20 @@ def compose_vertical(
         # the code panel is what should absorb the slack.
         f"{caption_var}.move_to("
         f"[0, _avail_top - {caption_var}.height / 2, 0])",
-        f"_code_top = {caption_var}.get_bottom()[1] - {BAND_GAP}",
-        f"_code_h = _code_top - ({SAFE_BOTTOM})",
+        f"_code_top = {caption_var}.get_bottom()[1] - {layout.band_gap}",
+        f"_code_h = _code_top - ({layout.safe_bottom})",
         # Fill the safe width, then take the remaining height. Both are
         # limits, not targets: a small window is scaled UP into the space,
         # which is the whole point.
-        f"{code_var}.scale_to_fit_width({CODE_VIEWPORT_WIDTH})",
+        f"{code_var}.scale_to_fit_width({layout.code_viewport_width})",
         f"if {code_var}.height > _code_h and _code_h > 0:",
         f"    {code_var}.scale_to_fit_height(_code_h)",
         f"elif {code_var}.height < _code_h:",
         # Growing to fill the height must not push the panel past the safe
         # width, so re-clamp width after the height-driven scale-up.
         f"    {code_var}.scale_to_fit_height(_code_h)",
-        f"    if {code_var}.width > {CODE_MAX_WIDTH}:",
-        f"        {code_var}.scale_to_fit_width({CODE_MAX_WIDTH})",
+        f"    if {code_var}.width > {layout.code_max_width}:",
+        f"        {code_var}.scale_to_fit_width({layout.code_max_width})",
         # Hang from the top of the region, directly under the explanation
         # it belongs to. Centring was tried and rejected on a real frame:
         # a width-bound panel that cannot fill the height then floats with
@@ -744,19 +882,95 @@ def compose_vertical(
     # with its contents - the measured cause of a 513 px panel on a tall
     # window. The content keeps whatever size the region allowed; the
     # viewport is put back.
-    lines += repin_viewport(code_var)
+    lines += repin_viewport(code_var, layout)
     return lines
 
 
-def title_text(text: str, var: str = "title") -> list[str]:
-    return [
-        f"{var} = Text({_lit(text)}, font_size=40, weight=BOLD)",
-        f"if {var}.width > {SAFE_WIDTH}: {var}.scale_to_fit_width({SAFE_WIDTH})",
-        f"{var}.move_to([0, {TITLE_Y}, 0])",
+def compose_columns(
+    anchor_vars: list[str],
+    caption_var: str = "caption",
+    code_var: str | None = "code_group",
+    layout: CompositionLayout | None = None,
+    scalars_var: str = "vars_group",
+    array_var: str = "arr_group",
+    pointer_var: str = "ptr_group",
+) -> list[str]:
+    """Code in the left column, state in the right, explanation below.
+
+    The landscape counterpart of `compose_vertical`, with the same rules
+    applied to a different arrangement:
+
+        state column   scalars hang from the top of the region; the array
+                       is anchored by its cells' top edge, so labels
+                       stacking higher never move it; maps and sequences
+                       were already top-aligned by their primitives
+        explanation    stays in its fixed band (placed by `caption_text`)
+        code column    fills the region's height, is fitted to the fixed
+                       viewport width, hangs from the region's top, and is
+                       re-pinned to the viewport - the Phase 6.5.3 invariant
+
+    Reads measured geometry and the names of the groups this module
+    builds, never an algorithm, a variable name or a step kind.
+    """
+    layout = layout or PORTRAIT
+    lines: list[str] = []
+    if scalars_var in anchor_vars:
+        lines.append(
+            f"{scalars_var}.move_to([{layout.scalars_x}, "
+            f"{layout.content_top} - {scalars_var}.height / 2, 0])"
+        )
+    if array_var in anchor_vars:
+        lines.append(f"_dy = {layout.array_top} - {array_var}.get_top()[1]")
+        lines.append(f"{array_var}.shift(UP * _dy)")
+        if pointer_var in anchor_vars:
+            lines.append(f"{pointer_var}.shift(UP * _dy)")
+
+    if code_var is None:
+        return lines
+
+    lines += [
+        f"_code_top = {layout.content_top}",
+        f"_code_h = {layout.content_top} - ({layout.content_bottom})",
+        # Identical sizing rules to the portrait column: width is the
+        # viewport, height is whatever the region allows, and growing to
+        # fill the height may not break the width.
+        f"{code_var}.scale_to_fit_width({layout.code_viewport_width})",
+        f"if {code_var}.height > _code_h and _code_h > 0:",
+        f"    {code_var}.scale_to_fit_height(_code_h)",
+        f"elif {code_var}.height < _code_h:",
+        f"    {code_var}.scale_to_fit_height(_code_h)",
+        f"    if {code_var}.width > {layout.code_max_width}:",
+        f"        {code_var}.scale_to_fit_width({layout.code_max_width})",
+        f"{code_var}.move_to([{layout.code_viewport_center_x}, "
+        f"_code_top - {code_var}.height / 2, 0])",
     ]
+    lines += repin_viewport(code_var, layout)
+    return lines
 
 
-def caption_text(text: str, var: str = "caption") -> list[str]:
+def title_text(
+    text: str, var: str = "title", layout: CompositionLayout | None = None
+) -> list[str]:
+    layout = layout or PORTRAIT
+    lines = [
+        f"{var} = Text({_lit(text)}, font_size=40, weight=BOLD)",
+        f"if {var}.width > {layout.safe_width}: "
+        f"{var}.scale_to_fit_width({layout.safe_width})",
+    ]
+    if layout.title_max_height is not None:
+        # A wide frame fits a long title at nearly its natural size, which
+        # would make the header louder than the lesson. Capped instead.
+        lines.append(
+            f"if {var}.height > {layout.title_max_height}: "
+            f"{var}.scale_to_fit_height({layout.title_max_height})"
+        )
+    lines.append(f"{var}.move_to([{layout.title_x}, {layout.title_y}, 0])")
+    return lines
+
+
+def caption_text(
+    text: str, var: str = "caption", layout: CompositionLayout | None = None
+) -> list[str]:
     """The step's explanation, wrapped rather than shrunk.
 
     A single long line scaled to the safe width becomes unreadably small —
@@ -765,15 +979,17 @@ def caption_text(text: str, var: str = "caption") -> list[str]:
     downward instead, and the band is capped so it cannot reach the code
     panel.
     """
-    wrapped = _wrap(text, CAPTION_CHARS_PER_LINE, CAPTION_MAX_LINES)
+    layout = layout or PORTRAIT
+    wrapped = _wrap(text, layout.caption_chars_per_line, layout.caption_max_lines)
     return [
         f"{var} = Text({_lit(wrapped)}, font_size={CAPTION_FONT_SIZE}, "
         f"color=GREY_A, line_spacing=0.8)",
         # Width first (long unbroken tokens), then the band height.
-        f"if {var}.width > {SAFE_WIDTH}: {var}.scale_to_fit_width({SAFE_WIDTH})",
-        f"if {var}.height > {CAPTION_MAX_HEIGHT}: "
-        f"{var}.scale_to_fit_height({CAPTION_MAX_HEIGHT})",
-        f"{var}.move_to([0, {CAPTION_Y}, 0])",
+        f"if {var}.width > {layout.caption_width}: "
+        f"{var}.scale_to_fit_width({layout.caption_width})",
+        f"if {var}.height > {layout.caption_max_height}: "
+        f"{var}.scale_to_fit_height({layout.caption_max_height})",
+        f"{var}.move_to([{layout.caption_x}, {layout.caption_y}, 0])",
     ]
 
 
@@ -804,7 +1020,9 @@ def _wrap(text: str, width: int, max_lines: int) -> str:
     return "\n".join(lines)
 
 
-def map_panel(state: FrameState, var: str = "map_group") -> list[str]:
+def map_panel(
+    state: FrameState, var: str = "map_group", layout: CompositionLayout | None = None
+) -> list[str]:
     """Observed key -> value entries of a Map.
 
     Renders EXACTLY what the trace observed and nothing more. There is no
@@ -816,6 +1034,7 @@ def map_panel(state: FrameState, var: str = "map_group") -> list[str]:
     determinism and the panel says so, rather than letting a viewer read
     the order as insertion order.
     """
+    layout = layout or PORTRAIT
     snapshot = state.primary_map
     if snapshot is None:
         return [f"{var} = VGroup()"]
@@ -852,17 +1071,20 @@ def map_panel(state: FrameState, var: str = "map_group") -> list[str]:
         f"_mlabel = Text({_lit(snapshot.name)}, font_size={INDEX_FONT_SIZE}, color=GREY)",
         f"_mlabel.next_to({var}, UP, buff=0.18)",
         f"{var}.add(_mlabel)",
-        f"if {var}.height > {STRUCTURE_MAX_HEIGHT}: "
-        f"{var}.scale_to_fit_height({STRUCTURE_MAX_HEIGHT})",
-        f"if {var}.width > {SAFE_WIDTH}: {var}.scale_to_fit_width({SAFE_WIDTH})",
+        f"if {var}.height > {layout.structure_max_height}: "
+        f"{var}.scale_to_fit_height({layout.structure_max_height})",
+        f"if {var}.width > {layout.structure_width}: "
+        f"{var}.scale_to_fit_width({layout.structure_width})",
         # Top-aligned: content grows down into free space, never up
         # into the scalars or down through the caption.
-        f"{var}.move_to([0, {STRUCTURE_TOP} - {var}.height / 2, 0])",
+        f"{var}.move_to([{layout.structure_x}, {layout.structure_top} - {var}.height / 2, 0])",
     ]
     return lines
 
 
-def sequence_panel(state: FrameState, var: str = "seq_group") -> list[str]:
+def sequence_panel(
+    state: FrameState, var: str = "seq_group", layout: CompositionLayout | None = None
+) -> list[str]:
     """Observed elements of a Deque/List/Queue.
 
     One primitive serves stack-like and queue-like use. The orientation is
@@ -871,6 +1093,7 @@ def sequence_panel(state: FrameState, var: str = "seq_group") -> list[str]:
     drawn as a vertical stack with the active end on top; `offer`/`addLast`
     act on the tail, so it is drawn horizontally front-to-rear.
     """
+    layout = layout or PORTRAIT
     snapshot = state.primary_sequence
     if snapshot is None:
         return [f"{var} = VGroup()"]
@@ -919,11 +1142,12 @@ def sequence_panel(state: FrameState, var: str = "seq_group") -> list[str]:
         f"font_size={INDEX_FONT_SIZE}, color=GREY)",
         f"_slabel.next_to({var}, UP, buff=0.18)",
         f"{var}.add(_slabel)",
-        f"if {var}.height > {STRUCTURE_MAX_HEIGHT}: "
-        f"{var}.scale_to_fit_height({STRUCTURE_MAX_HEIGHT})",
-        f"if {var}.width > {SAFE_WIDTH}: {var}.scale_to_fit_width({SAFE_WIDTH})",
+        f"if {var}.height > {layout.structure_max_height}: "
+        f"{var}.scale_to_fit_height({layout.structure_max_height})",
+        f"if {var}.width > {layout.structure_width}: "
+        f"{var}.scale_to_fit_width({layout.structure_width})",
         # Top-aligned: content grows down into free space, never up
         # into the scalars or down through the caption.
-        f"{var}.move_to([0, {STRUCTURE_TOP} - {var}.height / 2, 0])",
+        f"{var}.move_to([{layout.structure_x}, {layout.structure_top} - {var}.height / 2, 0])",
     ]
     return lines

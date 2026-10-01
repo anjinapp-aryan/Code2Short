@@ -31,9 +31,9 @@ Status labels:
 | Profile | Aspect | Orientation | Native resolution | Identity key | Status |
 |---|---|---|---|---|---|
 | `VERTICAL_HD` (default) | 9:16 | portrait | 1080 × 1920 | `youtube_short` | **Renderable.** The accepted Phase 6.5.1/6.5.3 baseline |
-| `LANDSCAPE_HD` | 16:9 | landscape | 1920 × 1080 | `landscape_hd` | Declared; **refuses to render** (no 16:9 composition yet, Phase 8.2) |
-| `VERTICAL_4K` | 9:16 | portrait | 2160 × 3840 | `vertical_4k` | Declared; **refuses to render** (no 4K benchmark yet, Phase 8.3) |
-| `LANDSCAPE_4K` | 16:9 | landscape | 3840 × 2160 | `landscape_4k` | Declared; **refuses to render** (needs Phases 8.2 and 8.3) |
+| `LANDSCAPE_HD` | 16:9 | landscape | 1920 × 1080 | `landscape_hd` | **Renderable** (Phase 8.2C). Native column composition: code left, state right, explanation band |
+| `VERTICAL_4K` | 9:16 | portrait | 2160 × 3840 | `vertical_4k` | **Renderable** (Phase 8.3). The portrait composition, rendered natively at 480 px/unit |
+| `LANDSCAPE_4K` | 16:9 | landscape | 3840 × 2160 | `landscape_4k` | **Renderable** (Phase 8.3). The column composition, rendered natively at 480 px/unit |
 
 A profile is a frozen dataclass: `id`, `label`, `aspect_width`/`aspect_height`,
 `pixel_width`/`pixel_height`, `identity_key`, and `unsupported_reason`
@@ -112,43 +112,62 @@ How a format reaches each stage:
 The render is 1080 × 1920, 30 fps, 3894 frames, 129.78 s, the same frame
 count as 6.5.3.
 
-**NOT YET IMPLEMENTED**
+The 4K render and benchmark, and the UI format selector, were
+implemented later (Phases 8.3 and 8.2D).
 
-- Any 16:9 composition. `visualization/primitives.py` is the portrait
-  layout (a 4.5 × 8 unit frame; bands, safe margins, code viewport and fonts
-  are all module constants).
-- Any 4K render or benchmark.
-- A format selector in the UI. The Create page shows a disabled
-  "YouTube Short · 1080 × 1920" field; Review shows "Format 1080 × 1920".
-- Per-profile layout, typography, caption, code-panel or safe-area data.
-  Deliberately **not** added to `VideoProfile` until a second composition
-  exists to justify their shape.
+## 8. 16:9 (Phase 8.2) — IMPLEMENTED
 
-## 8. Future 16:9 phase (Phase 8.2)
-
-What must change, found by the Phase 8.0 audit:
-
-- `primitives.py` layout constants (`FRAME_WIDTH=4.5`, `SAFE_*`, band `*_Y`,
-  `CODE_VIEWPORT_WIDTH`, `CAPTION_CHARS_PER_LINE`, `STRUCTURE_*`,
-  `CODE_HEIGHT_BUDGET`, …) become one layout value per orientation,
-  selected by `profile.orientation`. No `if width == …` chains.
-- `compose_vertical` is portrait-specific. A landscape composition
-  (code beside the visualization) is a new function, not a flag.
-- Then remove `unsupported_reason` from `LANDSCAPE_HD` and bump
-  `RENDERER_VERSION`.
+- **Layout seam (8.2B).** `visualization/layout.py::CompositionLayout`,
+  selected by `layout_for(profile)` from the profile's orientation and
+  passed to `ManimVideoRenderer` beside the resolution. Layout values
+  carry geometry only; typography and readability floors stay shared
+  constants, and both layouts keep 240 px per scene unit.
+- **Portrait.** `primitives.PORTRAIT` is built from the existing
+  constants. The portrait scene is byte-identical to the accepted 6.5.3
+  scene; a test pins its sha256.
+- **Landscape composition (8.2C).**
+  - `primitives.compose_columns`, next to `compose_vertical`, on an
+    8.0 × 4.5-unit frame with a 5% safe area.
+  - The code column is on the left at the portrait viewport width
+    (994 px); the state column is on the right (686 px); the explanation
+    is a full-width bottom band (≤ 80 chars × 3 lines).
+  - Pointer labels that would collide on adjacent cells are lifted a
+    level (landscape only).
+  - See `docs/PHASE_8_2C_LANDSCAPE_IMPLEMENTATION.md`.
+- **Guards.** A layout whose composition isn't implemented is refused
+  before Manim runs. A layout whose aspect doesn't match the requested
+  pixels is refused too, so a portrait arrangement can't be drawn into a
+  16:9 frame.
+- **Versioning.**
+  - `RENDERER_VERSION` was **not** bumped. The portrait output is
+    unchanged, and no 16:9 video existed before (the profile was always
+    refused), so no cached video could be stale.
+  - `PIPELINE_VERSION` was not bumped, because no stage changed.
 - Media validation already takes the profile's dimensions on the web path (Phase 8.1).
 
-## 9. Future 4K phase (Phase 8.3)
+## 9. 4K (Phase 8.3) — IMPLEMENTED
 
-- Portrait 4K shares the portrait composition: the scene's unit frame is
-  still 4.5 × 8, now at 480 px/unit. Whether stroke widths, the
-  `PIXELS_PER_UNIT=240` readability arithmetic and text rasterisation hold
-  at 4K is **not verified**.
-- Benchmark render time, CPU, memory, temporary disk (partial movie files)
-  and final size before enabling it.
-- `-qh` is passed together with `--resolution`. Confirm the explicit
-  resolution wins at 4K.
-- Then clear `unsupported_reason` for the 4K profiles.
+- **A profile, not a pipeline.** The two 4K profiles lost their
+  `unsupported_reason`; nothing else in the render path changed.
+  `layout_for` picks the HD layout of the same orientation, and the
+  renderer writes a **byte-identical scene** for HD and 4K. Only Manim's
+  `--resolution` differs, so 4K is 480 px per scene unit instead of 240.
+- **The open questions from 8.0, answered by measurement:**
+  - **Stroke widths and text scale with the frame.** A 4K frame holds
+    4.00× the ink of the HD frame of the same plan (an unscaled stroke
+    would pull that under 4). Box-downsampled 2×, the 4K frame matches the
+    HD one to about 0.3/255.
+  - **The `PIXELS_PER_UNIT = 240` arithmetic** is HD-only commentary. Every
+    readability floor is in units, so at 4K each is exactly twice the
+    pixels.
+  - **`--resolution` wins over `-qh`.** Render-stage MP4s probe at
+    3840 × 2160 and 2160 × 3840.
+- **Native, proven:** the render-stage frame has about 10× more spectral
+  energy beyond HD Nyquist than any smooth upscale of the HD frame, and
+  is not 2×2 blocks (that would be a nearest upscale).
+- **Cost:** 1.8–2.0× the HD render time and about 1.7 GiB peak (HD:
+  about 0.65 GiB).
+- See `docs/PHASE_8_3_4K_IMPLEMENTATION.md`.
 
 ---
 

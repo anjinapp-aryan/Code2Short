@@ -19,6 +19,7 @@
       <input type="hidden" name="audience" value="{{ version.request_fingerprint.config.audience }}">
       <input type="hidden" name="teaching_style" value="{{ version.request_fingerprint.config.teaching_style }}">
       <input type="hidden" name="voice" value="{{ version.request_fingerprint.config.voice }}">
+      <input type="hidden" name="video_format" value="{{ requested_profile.id.value }}">
       <input type="hidden" name="force" value="1">
       <button class="btn btn-primary" type="submit">Re-generate</button>
     </form>
@@ -70,6 +71,17 @@
       <div><dt>Program</dt><dd>{{ program.title }}</dd></div>
       <div><dt>Input</dt><dd><code>{{ program.input_value }}</code></dd></div>
       <div><dt>Duration</dt><dd>{{ duration(version.duration_seconds) }}</dd></div>
+      {# The GENERATED file's format: pixels probed from the final MP4. The
+         request is shown beside it only when the two disagree. #}
+      {% if measured %}
+        <div><dt>Format</dt><dd>{% if measured.profile %}{{ measured.profile|format_label }}{% else %}Unrecognised{% endif %}</dd></div>
+        <div><dt>Resolution</dt><dd>{{ measured.width }} × {{ measured.height }}</dd></div>
+        {% if measured.profile != requested_profile %}
+          <div><dt>Requested</dt><dd>{{ requested_profile|format_label }} (does not match the file)</dd></div>
+        {% endif %}
+      {% else %}
+        <div><dt>Format</dt><dd>{{ requested_profile|format_label }} (requested; no video to measure)</dd></div>
+      {% endif %}
       <div><dt>Voice</dt><dd>{{ version.request_fingerprint.config.voice }}</dd></div>
       <div><dt>Audience</dt><dd>{{ version.request_fingerprint.config.audience }}</dd></div>
       <div><dt>LLM provider</dt><dd>{{ version.request_fingerprint.llm_provider }}</dd></div>

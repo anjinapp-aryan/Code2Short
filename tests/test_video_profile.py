@@ -80,16 +80,23 @@ def test_the_default_is_the_accepted_vertical_hd_baseline() -> None:
     assert TeachingConfig().video_profile is VERTICAL_HD
 
 
-def test_only_the_baseline_is_renderable_in_phase_8_0() -> None:
-    """16:9 has no composition and 4K has no benchmark yet. Rendering a
-    portrait layout into a landscape frame, or an unmeasured 4K job, would
-    produce a video the fingerprint then records as real."""
-    assert VERTICAL_HD.is_renderable
-    VERTICAL_HD.require_renderable()
-    for profile in (LANDSCAPE_HD, VERTICAL_4K, LANDSCAPE_4K):
-        assert not profile.is_renderable
-        with pytest.raises(UnsupportedVideoProfileError, match=profile.resolution):
-            profile.require_renderable()
+def test_every_product_profile_is_renderable() -> None:
+    """Phase 8.3 benchmarked native 4K, so all four render. (Until 8.2C,
+    LANDSCAPE_HD was refused; until 8.3, both 4K profiles were.)"""
+    for profile in (VERTICAL_HD, LANDSCAPE_HD, VERTICAL_4K, LANDSCAPE_4K):
+        assert profile.is_renderable
+        profile.require_renderable()
+
+
+def test_a_profile_with_a_reason_is_refused_and_says_why() -> None:
+    """The refusal mechanism stays: a profile that is declared but not
+    ready names its size and its reason rather than rendering."""
+    import dataclasses
+
+    draft = dataclasses.replace(LANDSCAPE_4K, unsupported_reason="not ready")
+    assert not draft.is_renderable
+    with pytest.raises(UnsupportedVideoProfileError, match="3840x2160.*not ready"):
+        draft.require_renderable()
 
 
 # ---- TEST 6 — format participates in generation identity ------------------
@@ -114,6 +121,7 @@ def test_same_content_in_a_different_profile_never_collides() -> None:
     # The two pairs the brief names explicitly.
     assert digests[VideoProfileId.VERTICAL_HD] != digests[VideoProfileId.LANDSCAPE_HD]
     assert digests[VideoProfileId.VERTICAL_HD] != digests[VideoProfileId.VERTICAL_4K]
+    assert digests[VideoProfileId.LANDSCAPE_HD] != digests[VideoProfileId.LANDSCAPE_4K]
 
 
 def test_identity_keys_are_unique_and_pinned_to_their_pixels() -> None:
@@ -233,13 +241,23 @@ def test_the_web_form_still_produces_the_default_format() -> None:
 # ---- refusal happens before work, and the renderer gets the pixels --------
 
 
-def test_an_unrenderable_format_is_refused_before_a_version_exists(tmp_path: Path) -> None:
+def test_an_unrenderable_format_is_refused_before_a_version_exists(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import dataclasses
+
+    from code2shorts.core import video_profile
+
+    monkeypatch.setitem(
+        video_profile.PROFILES, VideoProfileId.VERTICAL_4K,
+        dataclasses.replace(VERTICAL_4K, unsupported_reason="made unrenderable for this test"),
+    )
     pipeline = _FakePipeline()
     registry = GenerationRegistry(tmp_path / "library")
     generator = GenerationManager(registry, pipeline, InMemoryArtifactStore())
 
     with pytest.raises(UnsupportedVideoProfileError):
-        generator.generate(_request(config=TeachingConfig(video_format="landscape_hd")), force=True)
+        generator.generate(_request(config=TeachingConfig(video_format="vertical_4k")), force=True)
 
     assert pipeline.builds == 0
     assert registry.all_versions() == [], "a refused format must not leave a running row"
@@ -275,12 +293,15 @@ def test_the_profile_reaches_manim_as_its_resolution(tmp_path: Path, monkeypatch
         ],
     )
 
-    with pytest.raises(RenderingFailure):
-        build_renderer(VERTICAL_HD).render(plan, tmp_path)
+    for profile, expected in ((VERTICAL_HD, "1080,1920"), (LANDSCAPE_HD, "1920,1080"),
+                              (VERTICAL_4K, "2160,3840"), (LANDSCAPE_4K, "3840,2160")):
+        commands.clear()
+        with pytest.raises(RenderingFailure):
+            build_renderer(profile).render(plan, tmp_path / profile.id.value)
 
-    command = commands[0]
-    assert command[command.index("--resolution") + 1] == "1080,1920"
-    assert command[command.index("--fps") + 1] == "30"
+        command = commands[0]
+        assert command[command.index("--resolution") + 1] == expected
+        assert command[command.index("--fps") + 1] == "30"
 
 
 # ---- the content model stays format-free ----------------------------------

@@ -39,9 +39,15 @@ XAI_DEFAULT_BASE_URL = "https://api.x.ai/v1"
 
 OPENROUTER_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 
+# Groq is OpenAI-compatible too: one more constant, no new class (ADR-5.1).
+GROQ_DEFAULT_BASE_URL = "https://api.groq.com/openai/v1"
+
+# NVIDIA NIM (build.nvidia.com) likewise.
+NVIDIA_DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
+
 KNOWN_PROVIDERS = (
     "mock", "gemini", "omniroute", "openrouter", "openai_compatible", "xai",
-    "failover",
+    "groq", "nvidia", "failover",
 )
 
 DEFAULT_PROVIDER_ORDER = ("omniroute", "openrouter", "gemini")
@@ -91,19 +97,28 @@ def build_llm_provider(settings=None, **overrides) -> LLMProvider:
             max_retries=overrides.get("max_retries", settings.ai_max_retries),
         )
 
-    if name in ("omniroute", "openai_compatible", "xai", "openrouter"):
+    if name in (
+        "omniroute", "openai_compatible", "xai", "openrouter", "groq", "nvidia"
+    ):
         from code2shorts.ai.providers.openai_compatible import OpenAICompatibleProvider
 
         defaults = {
             "omniroute": OMNIROUTE_DEFAULT_BASE_URL,
             "xai": XAI_DEFAULT_BASE_URL,
             "openrouter": OPENROUTER_DEFAULT_BASE_URL,
+            "groq": GROQ_DEFAULT_BASE_URL,
+            "nvidia": NVIDIA_DEFAULT_BASE_URL,
         }
         # OpenRouter has its own default URL, so a CODE2SHORTS_LLM_BASE_URL
         # set for OmniRoute must not be inherited by it - in a failover
         # chain both are built from the same Settings, and inheriting would
         # silently point the fallback at the primary that just failed.
-        configured_url = None if name == "openrouter" else settings.llm_base_url
+        # Groq likewise.
+        configured_url = (
+            None
+            if name in ("openrouter", "groq", "nvidia")
+            else settings.llm_base_url
+        )
         base_url = (
             overrides.get("base_url") or configured_url or defaults.get(name)
         )
@@ -121,6 +136,22 @@ def build_llm_provider(settings=None, **overrides) -> LLMProvider:
                     "CODE2SHORTS_OPENROUTER_API_KEY (or OPENROUTER_API_KEY)."
                 )
             model = overrides.get("model") or settings.openrouter_model
+        elif name == "groq":
+            api_key = overrides.get("api_key") or reveal(settings.groq_api_key)
+            if not api_key:
+                raise ProviderConfigurationError(
+                    "LLM_PROVIDER=groq requires a key: set GROQ_API_KEY "
+                    "(or CODE2SHORTS_GROQ_API_KEY)."
+                )
+            model = overrides.get("model") or settings.groq_model
+        elif name == "nvidia":
+            api_key = overrides.get("api_key") or reveal(settings.nvidia_api_key)
+            if not api_key:
+                raise ProviderConfigurationError(
+                    "LLM_PROVIDER=nvidia requires a key: set NVIDIA_API_KEY "
+                    "(or CODE2SHORTS_NVIDIA_API_KEY)."
+                )
+            model = overrides.get("model") or settings.nvidia_model
         elif name == "xai":
             # A remote paid endpoint, unlike a keyless local gateway: a
             # missing key must fail loudly here rather than reach the wire
@@ -238,6 +269,8 @@ CHAIN_CREDENTIALS: dict[str, tuple[str, ...]] = {
     "openrouter": ("openrouter_api_key",),
     "gemini": ("gemini_api_key",),
     "xai": ("xai_api_key",),
+    "groq": ("groq_api_key",),
+    "nvidia": ("nvidia_api_key",),
 }
 
 

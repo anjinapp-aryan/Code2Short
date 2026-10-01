@@ -62,11 +62,14 @@ CODE2SHORTS_ENV=production LLM_PROVIDER=gemini GEMINI_API_KEY=... python -m code
 | Variable | Required when | Notes |
 |---|---|---|
 | `CODE2SHORTS_ENV` | production | disables dotenv loading |
-| `LLM_PROVIDER` | always (defaults `mock`) | `mock` · `gemini` · `xai` · `omniroute` · `openai_compatible` |
+| `LLM_PROVIDER` | always (defaults `mock`) | `mock` · `gemini` · `xai` · `groq` · `omniroute` · `openai_compatible` · `openrouter` · `failover` |
 | `GEMINI_API_KEY` | `LLM_PROVIDER=gemini` | |
 | `GEMINI_MODEL` | optional | see §7 — Google retires ids |
 | `XAI_API_KEY` | `LLM_PROVIDER=xai` | keys begin `xai-` |
 | `GROK_MODEL` | optional | default `grok-4.1-fast` |
+| `GROQ_API_KEY` | `LLM_PROVIDER=groq`, or `groq` in a failover chain | keys begin `gsk_`; endpoint `https://api.groq.com/openai/v1` |
+| `GROQ_MODEL` | optional | default `openai/gpt-oss-120b` |
+| `LLM_PROVIDER_ORDER` | `LLM_PROVIDER=failover` | default `omniroute,openrouter,gemini`; e.g. `gemini,groq` |
 | `OMNIROUTE_BASE_URL` | `openai_compatible` | alias of `CODE2SHORTS_LLM_BASE_URL` |
 | `OMNIROUTE_API_KEY` | if the gateway needs one | alias of `CODE2SHORTS_LLM_API_KEY` |
 | `OMNIROUTE_MODEL` | optional | alias of `CODE2SHORTS_LLM_MODEL` |

@@ -518,8 +518,23 @@ def test_two_simultaneous_job_starts_run_one_job(library) -> None:
 # ---- G/H. formats ----------------------------------------------------------
 
 
-@pytest.mark.parametrize("video_format", ["landscape_hd", "vertical_4k", "landscape_4k"])
-def test_an_unsupported_format_leaves_nothing_behind(library, video_format) -> None:
+def _refuse(monkeypatch, video_format: str) -> None:
+    """No product profile is refused since Phase 8.3, so the refusal path
+    is exercised against a 4K profile made unrenderable for the test."""
+    import dataclasses
+
+    from code2shorts.core import video_profile
+
+    profile = video_profile.resolve_video_profile(video_format)
+    monkeypatch.setitem(
+        video_profile.PROFILES, profile.id,
+        dataclasses.replace(profile, unsupported_reason="made unrenderable for this test"),
+    )
+
+
+@pytest.mark.parametrize("video_format", ["vertical_4k", "landscape_4k"])
+def test_an_unsupported_format_leaves_nothing_behind(library, video_format, monkeypatch) -> None:
+    _refuse(monkeypatch, video_format)
     registry, store = library
     pipeline = _Pipeline()
     manager = GenerationManager(registry, pipeline, store)
@@ -532,11 +547,12 @@ def test_an_unsupported_format_leaves_nothing_behind(library, video_format) -> N
     assert not (registry.root / "palindrome").exists(), "no partial artifact directory"
 
 
-def test_an_unsupported_format_job_fails_cleanly(library) -> None:
+def test_an_unsupported_format_job_fails_cleanly(library, monkeypatch) -> None:
+    _refuse(monkeypatch, "vertical_4k")
     registry, store = library
     jobs = JobManager(GenerationManager(registry, _Pipeline(), store))
 
-    job = jobs.start(_request(config=TeachingConfig(video_format="landscape_hd")))
+    job = jobs.start(_request(config=TeachingConfig(video_format="vertical_4k")))
     for _ in range(100):
         current = jobs.get(job.id)
         if current.status not in (GenerationStatus.QUEUED, GenerationStatus.RUNNING):
@@ -544,7 +560,7 @@ def test_an_unsupported_format_job_fails_cleanly(library) -> None:
         time.sleep(0.02)
 
     assert current.status is GenerationStatus.FAILED
-    assert "16:9" in (current.error or "")
+    assert "4K" in (current.error or "")
     assert registry.all_versions() == []
 
 

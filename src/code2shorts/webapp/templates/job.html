@@ -9,6 +9,8 @@
 </div>
 
 <p class="lede" id="headline">Generating your teaching video…</p>
+{% set fmt = job.video_format|video_profile %}
+<p class="hint">Format: {{ fmt|format_label }} · {{ fmt.pixel_width }} × {{ fmt.pixel_height }}</p>
 
 {# Every value below is replaced by the poller from real backend state.
    Nothing here animates on a timer. #}

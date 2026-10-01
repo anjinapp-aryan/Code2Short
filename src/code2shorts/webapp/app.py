@@ -26,12 +26,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from code2shorts.config import Settings
+from code2shorts.core.video_profile import (
+    DEFAULT_VIDEO_PROFILE,
+    PROFILES,
+    Orientation,
+    UnknownVideoProfileError,
+    VideoProfile,
+    resolve_video_profile,
+)
 from code2shorts.generation import (
     GenerationManager,
     GenerationRegistry,
@@ -51,6 +59,64 @@ AUDIENCES = ("beginner", "intermediate", "advanced")
 TEACHING_STYLES = ("step_by_step", "concise", "interview")
 VOICES = ("af_heart",)
 
+# The formats the Create page offers: every profile that can actually be
+# rendered, read from the profile registry rather than listed again here.
+# A profile that is declared but refused is therefore never offered.
+FORMATS: tuple[VideoProfile, ...] = tuple(
+    profile for profile in PROFILES.values() if profile.is_renderable
+)
+
+# User-facing wording only. Keyed by orientation, never by profile id, so
+# it is copy for the page and not a second list of formats.
+FORMAT_COPY: dict[Orientation, tuple[str, str]] = {
+    Orientation.PORTRAIT: ("Vertical", "Shorts / Reels / TikTok"),
+    Orientation.LANDSCAPE: ("Landscape", "YouTube / Desktop / TV"),
+}
+
+
+# A profile whose short side is 2160 px is Ultra HD ("4K"). Read from the
+# profile's own pixels, so the wording cannot disagree with what renders.
+ULTRA_HD_SHORT_SIDE = 2160
+
+
+def _is_ultra_hd(profile: VideoProfile) -> bool:
+    return min(profile.pixel_width, profile.pixel_height) >= ULTRA_HD_SHORT_SIDE
+
+
+def format_label(profile: VideoProfile) -> str:
+    """"9:16 Vertical" / "16:9 Landscape", plus " 4K" for Ultra HD."""
+    label = f"{profile.aspect_ratio} {FORMAT_COPY[profile.orientation][0]}"
+    return f"{label} 4K" if _is_ultra_hd(profile) else label
+
+
+def format_use(profile: VideoProfile) -> str:
+    """The line under the label: where the format is for."""
+    return "Ultra HD" if _is_ultra_hd(profile) else FORMAT_COPY[profile.orientation][1]
+
+
+def _profile_for(video_format: str | None) -> VideoProfile:
+    """The profile a submitted `video_format` names.
+
+    Absent means the default (9:16), which keeps every Phase 7 form and
+    link working. Anything SUPPLIED must name an offered format: an
+    unknown value, an empty value or a refused profile (4K) is an error,
+    never quietly turned into portrait - that would hand the user a video
+    in a format they did not ask for.
+    """
+    if video_format is None:
+        return DEFAULT_VIDEO_PROFILE
+    try:
+        profile = resolve_video_profile(video_format) if video_format.strip() else None
+    except UnknownVideoProfileError:
+        profile = None
+    if profile is None or profile not in FORMATS:
+        offered = ", ".join(p.id.value for p in FORMATS)
+        raise HTTPException(
+            status_code=422,
+            detail=f"unsupported video_format {video_format!r}; offered: {offered}",
+        )
+    return profile
+
 MEDIA_TYPES = {
     ".mp4": "video/mp4",
     ".wav": "audio/wav",
@@ -59,14 +125,33 @@ MEDIA_TYPES = {
 }
 
 
-def _config_from_form(audience: str, teaching_style: str, voice: str) -> TeachingConfig:
-    """Reject anything not offered, rather than passing it through."""
+async def _submitted_video_format(request: Request) -> str | None:
+    """The `video_format` exactly as submitted: None when the field is
+    absent, the string (possibly empty) when it is present.
+
+    Read from the parsed form rather than declared as `Form(None)`, because
+    FastAPI maps an EMPTY form value to the parameter's default - which
+    would turn `video_format=` into a silent 9:16. Starlette caches the
+    parsed form, so this reads what the route already parsed.
+    """
+    return (await request.form()).get("video_format")
+
+
+def _config_from_form(
+    audience: str, teaching_style: str, voice: str, video_format: str | None = None
+) -> TeachingConfig:
+    """Reject anything not offered, rather than passing it through.
+
+    The teaching fields fall back to their first option (unchanged since
+    Phase 7). The format does not fall back: see `_profile_for`.
+    """
     return TeachingConfig(
         audience=audience if audience in AUDIENCES else AUDIENCES[0],
         teaching_style=(
             teaching_style if teaching_style in TEACHING_STYLES else TEACHING_STYLES[0]
         ),
         voice=voice if voice in VOICES else VOICES[0],
+        video_format=_profile_for(video_format).id.value,
     )
 
 
@@ -91,6 +176,11 @@ def create_app(
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
     templates = Jinja2Templates(directory=str(HERE / "templates"))
     templates.env.autoescape = True
+    # A stored `video_format` (a profile id or identity key) -> its profile,
+    # so templates render labels and pixels from the one profile registry.
+    templates.env.filters["video_profile"] = resolve_video_profile
+    templates.env.filters["format_label"] = format_label
+    templates.env.filters["format_use"] = format_use
 
     app.state.registry = registry
     app.state.manager = manager
@@ -173,6 +263,8 @@ def create_app(
             audiences=AUDIENCES,
             styles=TEACHING_STYLES,
             voices=VOICES,
+            formats=FORMATS,
+            default_format=DEFAULT_VIDEO_PROFILE,
         )
 
     @app.post("/create/review", response_class=HTMLResponse)
@@ -182,6 +274,7 @@ def create_app(
         audience: str = Form("beginner"),
         teaching_style: str = Form("step_by_step"),
         voice: str = Form("af_heart"),
+        video_format: str | None = Depends(_submitted_video_format),
     ):
         """The gate in front of expensive work.
 
@@ -189,7 +282,7 @@ def create_app(
         generation only starts if the user then presses the button.
         Nothing is generated by loading a page.
         """
-        config = _config_from_form(audience, teaching_style, voice)
+        config = _config_from_form(audience, teaching_style, voice, video_format)
         generation_request = build_request(program, config)
         decision = manager.decide(generation_request)
         return page(
@@ -208,10 +301,11 @@ def create_app(
         audience: str = Form("beginner"),
         teaching_style: str = Form("step_by_step"),
         voice: str = Form("af_heart"),
+        video_format: str | None = Depends(_submitted_video_format),
         force: str = Form(""),
     ):
         """Begin generation. `force` is set ONLY by Re-generate."""
-        config = _config_from_form(audience, teaching_style, voice)
+        config = _config_from_form(audience, teaching_style, voice, video_format)
         generation_request = build_request(program, config)
         forced = force == "1"
         if not forced:
@@ -249,13 +343,18 @@ def create_app(
         record = registry.get(slug, version)
         if record is None:
             raise HTTPException(status_code=404, detail="unknown version")
+        final_path = registry.artifact_path(record, "final_video")
         return page(
             request,
             "video.html",
             program=program,
             version=record,
             versions=registry.versions_for(slug),
-            has_video=registry.artifact_path(record, "final_video") is not None,
+            has_video=final_path is not None,
+            requested_profile=resolve_video_profile(
+                record.request_fingerprint.config.get("video_format")
+            ),
+            measured=_measured_format(final_path),
             audiences=AUDIENCES,
             styles=TEACHING_STYLES,
             voices=VOICES,
@@ -349,6 +448,7 @@ def create_app(
         return {
             "id": job.id,
             "algorithm": job.algorithm,
+            "video_format": resolve_video_profile(job.video_format).id.value,
             "status": job.status,
             "progress": job.progress,
             "version": job.version,
@@ -371,6 +471,29 @@ def create_app(
         return {"status": "ok"}
 
     return app
+
+
+def _measured_format(path: Path | None) -> dict | None:
+    """What the generated file IS, read from the file itself.
+
+    The details page states the format of the artifact, not of a form
+    control: the pixels are probed from the final MP4 and matched against
+    the profile registry. None when there is no file to measure.
+    """
+    if path is None:
+        return None
+    from code2shorts.media.probe import VideoProbeError, probe_video
+
+    try:
+        video = probe_video(path)
+    except VideoProbeError:
+        return None
+    profile = next(
+        (p for p in PROFILES.values()
+         if (p.pixel_width, p.pixel_height) == (video.width, video.height)),
+        None,
+    )
+    return {"width": video.width, "height": video.height, "profile": profile}
 
 
 def _stage_labels() -> list[str]:

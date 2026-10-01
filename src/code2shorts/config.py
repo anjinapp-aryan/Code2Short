@@ -93,6 +93,8 @@ class Settings(BaseSettings):
             "llm_api_key": ("OMNI_ROUTE_LLM_API_KEY", "OMNIROUTE_API_KEY", "LLM_API_KEY"),
             "gemini_api_key": ("GEMINI_API_KEY",),
             "xai_api_key": ("XAI_API_KEY",),
+            "groq_api_key": ("GROQ_API_KEY",),
+            "nvidia_api_key": ("NVIDIA_API_KEY",),
             "openrouter_api_key": ("OPENROUTER_API_KEY",),
             "llm_base_url": ("OMNI_ROUTE_LLM_BASE_URL", "OMNIROUTE_BASE_URL", "LLM_BASE_URL"),
         }
@@ -280,6 +282,28 @@ class Settings(BaseSettings):
         default="grok-4.1-fast",
         validation_alias=AliasChoices("CODE2SHORTS_XAI_MODEL", "GROK_MODEL", "XAI_MODEL"),
     )
+
+    # Groq: an OpenAI-compatible endpoint (api.groq.com/openai/v1), so one
+    # more base_url and no provider class (ADR-5.1).
+    groq_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("CODE2SHORTS_GROQ_API_KEY", "GROQ_API_KEY"),
+    )
+    groq_model: str = Field(
+        default="openai/gpt-oss-120b",
+        validation_alias=AliasChoices("CODE2SHORTS_GROQ_MODEL", "GROQ_MODEL"),
+    )
+
+    # NVIDIA NIM: OpenAI-compatible (integrate.api.nvidia.com/v1), so one
+    # more base_url and no provider class (ADR-5.1).
+    nvidia_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("CODE2SHORTS_NVIDIA_API_KEY", "NVIDIA_API_KEY"),
+    )
+    nvidia_model: str = Field(
+        default="nvidia/nemotron-3.5-lightning-30b-a3b",
+        validation_alias=AliasChoices("CODE2SHORTS_NVIDIA_MODEL", "NVIDIA_MODEL"),
+    )
     ai_timeout_seconds: float = 30.0
     ai_max_retries: int = 2
     ai_max_repair_attempts: int = 2
@@ -369,6 +393,8 @@ PROVIDER_CREDENTIALS: dict[str, tuple[str, str]] = {
     "openrouter": ("openrouter_api_key", "OPENROUTER_API_KEY"),
     "xai": ("xai_api_key", "XAI_API_KEY"),
     "grok": ("xai_api_key", "XAI_API_KEY"),
+    "groq": ("groq_api_key", "GROQ_API_KEY"),
+    "nvidia": ("nvidia_api_key", "NVIDIA_API_KEY"),
 }
 
 

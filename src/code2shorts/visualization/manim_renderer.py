@@ -36,10 +36,13 @@ from code2shorts.visualization.code_state import (
     build_code_state,
     resolve_source_locations,
 )
+from code2shorts.visualization.layout import CompositionLayout
 from code2shorts.visualization.primitives import (
+    PORTRAIT,
     array_row,
     caption_text,
     code_panel,
+    compose_columns,
     compose_vertical,
     fit_window_radius,
     map_panel,
@@ -57,6 +60,9 @@ from code2shorts.visualization.renderer import (
 from code2shorts.visualization.state import FrameState, reconstruct_frames
 
 RENDERER_VERSION = "code2shorts-manim-renderer-1.1"
+
+# Which function arranges one step, by `CompositionLayout.composer`.
+COMPOSERS = {"vertical": compose_vertical, "columns": compose_columns}
 OUTPUT_FILE_NAME = "output.mp4"
 
 
@@ -69,6 +75,7 @@ def build_scene_source(
     class_name: str,
     context: RenderContext | None = None,
     window_radius: int = DEFAULT_WINDOW_RADIUS,
+    layout: CompositionLayout | None = None,
 ) -> str:
     """Deterministic Manim scene source generation.
 
@@ -84,7 +91,17 @@ def build_scene_source(
 
     Fully algorithm-agnostic: there is no branch anywhere on algorithm
     name. The visuals are driven entirely by what the trace contains.
+
+    `layout` decides geometry only (default: the portrait composition).
+    A layout whose composition is not implemented is refused here, so it
+    can never be drawn with the portrait arrangement instead.
     """
+    layout = layout or PORTRAIT
+    if not layout.composition_implemented:
+        raise RenderingFailure(
+            f"the {layout.name} composition is not implemented yet; refusing to "
+            "render it with another layout's arrangement"
+        )
     frames_by_step: dict[int, FrameState] = {}
     locations: dict[int, SourceLocation] = {}
     source_files: dict[str, str] = {}
@@ -101,7 +118,7 @@ def build_scene_source(
             )
 
     body: list[str] = []
-    body += title_text(plan.lesson_title)
+    body += title_text(plan.lesson_title, layout=layout)
     body += [f"self.play(FadeIn(title), run_time={TITLE_FADE_IN_SECONDS})"]
     body += [f"self.wait({TITLE_HOLD_SECONDS})"]
 
@@ -117,19 +134,21 @@ def build_scene_source(
         # special case here — its low/mid/high are ordinary scalars that
         # index an array, so the existing pointer rule already draws them.
         if frame is not None and frame.primary_map is not None:
-            step_body += map_panel(frame, var="map_group")
-            step_body += scalar_panel(frame, var="vars_group")
+            step_body += map_panel(frame, var="map_group", layout=layout)
+            step_body += scalar_panel(frame, var="vars_group", layout=layout)
             groups = ["map_group", "vars_group"]
 
         elif frame is not None and frame.primary_sequence is not None:
-            step_body += sequence_panel(frame, var="seq_group")
-            step_body += scalar_panel(frame, var="vars_group")
+            step_body += sequence_panel(frame, var="seq_group", layout=layout)
+            step_body += scalar_panel(frame, var="vars_group", layout=layout)
             groups = ["seq_group", "vars_group"]
 
         elif frame is not None and frame.primary_array is not None:
-            step_body += array_row(frame, var="arr_group")
-            step_body += pointer_arrows(frame, array_var="arr_group", var="ptr_group")
-            step_body += scalar_panel(frame, var="vars_group")
+            step_body += array_row(frame, var="arr_group", layout=layout)
+            step_body += pointer_arrows(
+                frame, array_var="arr_group", var="ptr_group", layout=layout
+            )
+            step_body += scalar_panel(frame, var="vars_group", layout=layout)
             groups = ["arr_group", "ptr_group", "vars_group"]
 
         # Code window synchronized to the real source location of THIS
@@ -143,14 +162,14 @@ def build_scene_source(
             # left black; a window of short lines is height-bound and
             # keeps the minimum. See primitives.fit_window_radius.
             radius = fit_window_radius(
-                location, source_files, minimum=window_radius
+                location, source_files, minimum=window_radius, layout=layout
             )
             code_state = build_code_state(location, source_files, radius)
             if code_state.lines:
-                step_body += code_panel(code_state, var="code_group")
+                step_body += code_panel(code_state, var="code_group", layout=layout)
                 groups.append("code_group")
 
-        step_body += caption_text(step.narration_text, var="caption")
+        step_body += caption_text(step.narration_text, var="caption", layout=layout)
         groups.append("caption")
 
         # Content-aware composition of the LOWER region. The bands above
@@ -161,10 +180,12 @@ def build_scene_source(
         # short caption left ~255 px of unreachable black on the canvas.
         structure_vars = [name for name in groups if name.endswith("_group")
                           and name != "code_group"]
-        step_body += compose_vertical(
+        compose = COMPOSERS[layout.composer]
+        step_body += compose(
             structure_vars,
             caption_var="caption",
             code_var="code_group" if "code_group" in groups else None,
+            layout=layout,
         )
 
         # Replace the previous step's visuals rather than stacking them —
@@ -201,7 +222,7 @@ def build_scene_source(
             # full 1080x1920 addressable and square (240 px per unit on
             # both axes), which is what the layout constants in
             # primitives.py now assume.
-            "config.frame_height = 8.0",
+            f"config.frame_height = {layout.frame_height}",
             "config.frame_width = config.frame_height * "
             "(config.pixel_width / config.pixel_height)",
             "",
@@ -219,9 +240,11 @@ class ManimVideoRenderer(VideoRenderer):
         resolution: str = "1080x1920",
         timeout_seconds: float = 300.0,
         run_subprocess_fn: Callable[..., ProcessResult] | None = None,
+        layout: CompositionLayout | None = None,
     ) -> None:
         self._fps = fps
         self._resolution = resolution
+        self._layout = layout or PORTRAIT
         self._timeout_seconds = timeout_seconds
         self._run_subprocess_fn = run_subprocess_fn or run_subprocess
 
@@ -238,15 +261,26 @@ class ManimVideoRenderer(VideoRenderer):
         # "output/golden/render/output/golden/render/scene.py" and Manim
         # reported FileNotFoundError. Absolute paths are immune to this
         # regardless of the caller's working directory.
+        width, height = self._resolution.split("x")
+        # The layout and the pixels must describe the same shape. A portrait
+        # arrangement asked to fill a landscape frame is refused here, before
+        # anything is written or run, rather than rendered as a narrow column.
+        pixel_aspect = int(width) / int(height)
+        if abs(pixel_aspect - self._layout.aspect) > 1e-3:
+            raise RenderingFailure(
+                f"the {self._layout.name} layout ({self._layout.aspect:.4f}) does not "
+                f"match the requested {self._resolution} ({pixel_aspect:.4f})"
+            )
+
         output_dir = output_dir.resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
         class_name = "GeneratedScene"
         scene_path = output_dir / "scene.py"
         scene_path.write_text(
-            build_scene_source(plan, class_name, context), encoding="utf-8"
+            build_scene_source(plan, class_name, context, layout=self._layout),
+            encoding="utf-8",
         )
 
-        width, height = self._resolution.split("x")
         command = [
             "manim",
             "render",

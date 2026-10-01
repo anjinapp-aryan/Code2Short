@@ -10,13 +10,14 @@ execution trace, the educational plan and the narration never see it:
                                                     |
                                         renderer -> MP4          (format-aware)
 
-Four product profiles exist. Only VERTICAL_HD is renderable today, because
-the only composition that exists - `visualization/primitives.py` - is the
-accepted Phase 6.5.1/6.5.3 portrait layout. The others are declared so
-generation identity, configuration and the UI can already name them, and
-they refuse to render with a reason rather than producing a portrait
-layout squeezed into a landscape frame (16:9) or an unbenchmarked render
-(4K). See docs/VIDEO-FORMATS.md.
+Four product profiles exist, and all four render. VERTICAL_HD is the
+accepted Phase 6.5.1/6.5.3 portrait composition and LANDSCAPE_HD the Phase
+8.2C column composition. The 4K profiles (Phase 8.3) use the SAME
+compositions at twice the pixel density: the layout is chosen by
+orientation and stated in scene units, so 4K changes only how many pixels
+Manim rasterises. A profile can still be declared unrenderable with an
+`unsupported_reason`, and is then refused before any work starts. See
+docs/VIDEO-FORMATS.md and docs/PHASE_8_3_4K_IMPLEMENTATION.md.
 
 `pixel_width` x `pixel_height` is always the NATIVE render size. There is
 no upscaling here: a 4K profile means Manim renders 4K, never "render
@@ -147,7 +148,6 @@ LANDSCAPE_HD = VideoProfile(
     pixel_width=1920,
     pixel_height=1080,
     identity_key="landscape_hd",
-    unsupported_reason="the 16:9 composition does not exist yet (Phase 8.2)",
 )
 VERTICAL_4K = VideoProfile(
     id=VideoProfileId.VERTICAL_4K,
@@ -157,7 +157,6 @@ VERTICAL_4K = VideoProfile(
     pixel_width=2160,
     pixel_height=3840,
     identity_key="vertical_4k",
-    unsupported_reason="native 4K rendering has not been benchmarked (Phase 8.3)",
 )
 LANDSCAPE_4K = VideoProfile(
     id=VideoProfileId.LANDSCAPE_4K,
@@ -167,9 +166,6 @@ LANDSCAPE_4K = VideoProfile(
     pixel_width=3840,
     pixel_height=2160,
     identity_key="landscape_4k",
-    unsupported_reason=(
-        "needs the 16:9 composition (Phase 8.2) and a 4K benchmark (Phase 8.3)"
-    ),
 )
 
 PROFILES: dict[VideoProfileId, VideoProfile] = {

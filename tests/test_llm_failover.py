@@ -394,3 +394,117 @@ def test_the_failover_module_never_logs_a_key_or_a_prompt() -> None:
             if isinstance(argument, ast.Attribute) and "key" in argument.attr.lower():
                 offenders.append(argument.attr)
     assert not offenders, f"failover logs sensitive values: {offenders}"
+
+
+# ---- Groq: one more OpenAI-compatible base_url -----------------------------
+
+
+def test_groq_is_built_against_groq_with_its_own_key_and_model() -> None:
+    from code2shorts.ai.providers.factory import GROQ_DEFAULT_BASE_URL
+
+    built = build_llm_provider(
+        _settings(
+            llm_provider="groq",
+            groq_api_key=FAKE_KEY,
+            groq_model="openai/gpt-oss-120b",
+            # An OmniRoute URL must not be inherited: in a chain that would
+            # point the Groq fallback at the gateway that just failed.
+            llm_base_url="http://127.0.0.1:1/v1",
+        )
+    )
+    assert GROQ_DEFAULT_BASE_URL == "https://api.groq.com/openai/v1"
+    assert built.describe["base_url"] == GROQ_DEFAULT_BASE_URL
+    assert built.describe["model"] == "openai/gpt-oss-120b"
+    assert built._api_key == FAKE_KEY
+
+
+def test_groq_without_a_key_fails_loudly_rather_than_reaching_the_wire() -> None:
+    with pytest.raises(ProviderConfigurationError) as raised:
+        build_llm_provider(_settings(llm_provider="groq", groq_api_key=None))
+    assert "GROQ_API_KEY" in str(raised.value)
+
+
+def test_groq_joins_a_chain_only_when_its_key_is_set() -> None:
+    order = "gemini,groq"
+    with_key = build_llm_provider(
+        _settings(
+            llm_provider="failover",
+            llm_provider_order=order,
+            gemini_api_key=FAKE_KEY,
+            groq_api_key=FAKE_KEY,
+        )
+    )
+    without_key = build_llm_provider(
+        _settings(llm_provider="failover", llm_provider_order=order, gemini_api_key=FAKE_KEY)
+    )
+    assert with_key.provider_names == ["gemini", "groq"]
+    assert without_key.provider_names == ["gemini"]
+
+
+def test_a_gemini_quota_429_falls_through_to_groq() -> None:
+    """The case this exists for: Gemini's free-tier 429 is transient, so
+    the next provider answers instead of the job failing."""
+    from code2shorts.ai.providers.gemini import GeminiTransientError
+
+    class QuotaExhausted(LLMProvider):
+        provider_name = "gemini"
+
+        def is_configured(self) -> bool:
+            return True
+
+        def complete(self, prompt, system=None):
+            raise GeminiTransientError("429 RESOURCE_EXHAUSTED")
+
+    class Answers(LLMProvider):
+        provider_name = "groq"
+
+        def is_configured(self) -> bool:
+            return True
+
+        def complete(self, prompt, system=None):
+            return "pong"
+
+    built = FailoverLLMProvider([("gemini", QuotaExhausted()), ("groq", Answers())])
+    assert built.complete("ping") == "pong"
+    assert built.describe == {
+        "provider": "groq", "chain": "gemini,groq", "fallback_from": "gemini",
+    }
+
+
+# ---- NVIDIA NIM: another OpenAI-compatible base_url ------------------------
+
+
+def test_nvidia_is_built_against_nvidia_with_its_own_key_and_model() -> None:
+    from code2shorts.ai.providers.factory import NVIDIA_DEFAULT_BASE_URL
+
+    built = build_llm_provider(
+        _settings(
+            llm_provider="nvidia",
+            nvidia_api_key=FAKE_KEY,
+            nvidia_model="z-ai/glm-5.3",
+            llm_base_url="http://127.0.0.1:1/v1",
+        )
+    )
+    assert NVIDIA_DEFAULT_BASE_URL == "https://integrate.api.nvidia.com/v1"
+    assert built.describe["base_url"] == NVIDIA_DEFAULT_BASE_URL
+    assert built.describe["model"] == "z-ai/glm-5.3"
+    assert built._api_key == FAKE_KEY
+
+
+def test_nvidia_without_a_key_fails_loudly() -> None:
+    with pytest.raises(ProviderConfigurationError) as raised:
+        build_llm_provider(_settings(llm_provider="nvidia", nvidia_api_key=None))
+    assert "NVIDIA_API_KEY" in str(raised.value)
+
+
+def test_a_three_provider_chain_keeps_its_configured_order() -> None:
+    built = build_llm_provider(
+        _settings(
+            llm_provider="failover",
+            llm_provider_order="gemini,groq,nvidia",
+            gemini_api_key=FAKE_KEY,
+            groq_api_key=FAKE_KEY,
+            nvidia_api_key=FAKE_KEY,
+        )
+    )
+    assert built.provider_names == ["gemini", "groq", "nvidia"]

@@ -226,6 +226,19 @@ h3 { font-size: 15px; margin: 0; }
 .choice-sub { color: var(--ink-2); font-size: 13px; }
 .choice-io { color: var(--ink-3); font-size: 12px; }
 
+/* Video format picker: the native radio stays VISIBLE - it is the
+   keyboard control and the non-colour selected indicator - and the card
+   border follows the checked state live, without script. */
+.format-picker { border: 0; padding: 0; margin: 14px 0 0; }
+.format-picker legend { font-weight: 600; margin-bottom: 4px; }
+.formats { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+.format-choice { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; }
+.format-choice input { position: static; opacity: 1; pointer-events: auto;
+                       margin-top: 3px; accent-color: var(--accent); }
+.format-text { display: grid; gap: 2px; }
+.format-choice:has(input:checked) { border-color: var(--accent); }
+.format-choice:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+
 .fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
           gap: 12px; margin-top: 10px; }
 .field { display: grid; gap: 5px; font-size: 13px; color: var(--ink-2); }

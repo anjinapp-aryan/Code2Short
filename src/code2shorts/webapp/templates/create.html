@@ -52,11 +52,27 @@
             {% for value in voices %}<option value="{{ value }}">{{ value }}</option>{% endfor %}
           </select>
         </label>
-        <label class="field">
-          <span>Format</span>
-          <input type="text" value="YouTube Short · 1080 × 1920" disabled>
-        </label>
       </div>
+
+      {# Video format. Options, labels and pixel sizes come from the profile
+         registry (FORMATS); the submitted value is the profile id. The
+         default is explicit - never inferred from the viewer's screen. #}
+      <fieldset class="format-picker">
+        <legend>Video format</legend>
+        <div class="choices formats">
+          {% for fmt in formats %}
+          <label class="choice format-choice">
+            <input type="radio" name="video_format" value="{{ fmt.id.value }}"
+                   {% if fmt.id == default_format.id %}checked{% endif %}>
+            <span class="format-text">
+              <span class="choice-title">{{ fmt|format_label }}</span>
+              <span class="choice-sub">{{ fmt.pixel_width }} × {{ fmt.pixel_height }}</span>
+              <span class="choice-io">{{ fmt|format_use }}</span>
+            </span>
+          </label>
+          {% endfor %}
+        </div>
+      </fieldset>
 
       <details class="advanced">
         <summary>Advanced settings</summary>

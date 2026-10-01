@@ -18,6 +18,7 @@
         <input type="hidden" name="audience" value="{{ config.audience }}">
         <input type="hidden" name="teaching_style" value="{{ config.teaching_style }}">
         <input type="hidden" name="voice" value="{{ config.voice }}">
+        <input type="hidden" name="video_format" value="{{ (config.video_format|video_profile).id.value }}">
         <input type="hidden" name="force" value="1">
         <button class="btn btn-ghost" type="submit">Re-generate anyway</button>
       </form>
@@ -38,7 +39,11 @@
     <div><dt>Audience</dt><dd>{{ config.audience|replace('_',' ')|capitalize }}</dd></div>
     <div><dt>Teaching style</dt><dd>{{ config.teaching_style|replace('_',' ')|capitalize }}</dd></div>
     <div><dt>Voice</dt><dd>{{ config.voice }}</dd></div>
-    <div><dt>Format</dt><dd>1080 × 1920</dd></div>
+    {# The validated request, not a browser control: this is the format
+       the server will generate. #}
+    {% set fmt = config.video_format|video_profile %}
+    <div><dt>Format</dt><dd>{{ fmt|format_label }}</dd></div>
+    <div><dt>Resolution</dt><dd>{{ fmt.pixel_width }} × {{ fmt.pixel_height }}</dd></div>
     <div><dt>LLM provider</dt><dd>{{ llm_provider }}</dd></div>
   </dl>
 
@@ -60,6 +65,7 @@
   <input type="hidden" name="audience" value="{{ config.audience }}">
   <input type="hidden" name="teaching_style" value="{{ config.teaching_style }}">
   <input type="hidden" name="voice" value="{{ config.voice }}">
+  <input type="hidden" name="video_format" value="{{ (config.video_format|video_profile).id.value }}">
   <button class="btn btn-primary btn-lg" type="submit">
     {% if decision.should_generate %}Generate video{% else %}Watch existing{% endif %}
   </button>

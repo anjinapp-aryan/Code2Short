@@ -28,6 +28,7 @@ from code2shorts.narration import (
     TTSProvider,
 )
 from code2shorts.visualization import ManimVideoRenderer
+from code2shorts.visualization.layout import layout_for
 from code2shorts.workflow import (
     ComposeMediaNode,
     CompileNode,
@@ -66,13 +67,16 @@ def build_tts(config, settings: Settings) -> TTSProvider:
 def build_renderer(profile: VideoProfile) -> ManimVideoRenderer:
     """The renderer for one output format.
 
-    The profile reaches Manim only as its pixel size: the scene derives its
-    frame from the pixel aspect (`manim_renderer.build_scene_source`), and
-    FFmpeg copies the rendered video stream, so this is the one place a
-    format enters the render path.
+    The profile reaches Manim as its pixel size and as the layout its
+    orientation selects (`visualization.layout.layout_for`). The scene
+    derives its frame from the layout, and FFmpeg copies the rendered video
+    stream, so this is the one place a format enters the render path.
     """
     return ManimVideoRenderer(
-        fps=30, resolution=profile.resolution, timeout_seconds=900.0
+        fps=30,
+        resolution=profile.resolution,
+        timeout_seconds=900.0,
+        layout=layout_for(profile),
     )
 
 
