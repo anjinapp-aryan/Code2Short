@@ -318,18 +318,66 @@ public final class Code2ShortsTrace {
      *  event limit must still be able to report the exception that limit
      *  itself raised. */
     public static void exceptionThrown(Throwable t) {
-        StackTraceElement site = t.getStackTrace().length > 0 ? t.getStackTrace()[0] : null;
+        StackTraceElement site = userSite(t.getStackTrace());
         JsonWriter json = new JsonWriter();
         json.field("event_type", "EXCEPTION_THROWN");
         json.field("call_depth", callDepth);
         json.field("exception_class", t.getClass().getName());
         json.field("message", String.valueOf(t.getMessage()));
         if (site != null) {
-            json.field("thrown_at_line", site.getLineNumber());
+            int line = originalLine(site);
+            if (line > 0) {
+                json.field("thrown_at_line", line);
+            }
             json.field("thrown_in_method", site.getMethodName());
         }
         json.field("description", t.getClass().getSimpleName() + ": " + t.getMessage());
         TRACE_OUT.println("TRACE:" + json.build());
+    }
+
+    /** Phase 8.4.2: instrumented line -> ORIGINAL line, per class. Index is
+     *  the line of the re-printed source the JVM reports; the value is the
+     *  user's line, 0 where the printed line is not user code. Registered
+     *  by a static initializer the instrumenter appends to every class it
+     *  rewrites (see LineMap.java), so it is in place before that class
+     *  runs any code. Never counted as an event. */
+    private static final java.util.Map<String, int[]> LINE_MAPS =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    public static void lineMap(String className, String table) {
+        String[] parts = table.split(",");
+        int[] lines = new int[parts.length];
+        for (int i = 0; i < parts.length; i++) {
+            lines[i] = Integer.parseInt(parts[i]);
+        }
+        LINE_MAPS.put(className, lines);
+    }
+
+    /** The innermost frame in the user's own (instrumented) code. An
+     *  exception raised inside the JDK (Integer.parseInt) or in this class
+     *  (a trace limit) surfaces in the user's source at that frame; the
+     *  JDK's own line would mean nothing on the code panel. Falls back to
+     *  the top frame when no class registered a map (hand-instrumented
+     *  sources), which is the pre-8.4.2 behaviour. */
+    private static StackTraceElement userSite(StackTraceElement[] frames) {
+        for (StackTraceElement frame : frames) {
+            if (LINE_MAPS.containsKey(frame.getClassName())) {
+                return frame;
+            }
+        }
+        return frames.length > 0 ? frames[0] : null;
+    }
+
+    /** The user's line for this frame; the frame's own line when its class
+     *  has no map; 0 when the printed line maps to no user code (so the
+     *  field is omitted rather than reported wrong). */
+    private static int originalLine(StackTraceElement frame) {
+        int[] lines = LINE_MAPS.get(frame.getClassName());
+        if (lines == null) {
+            return frame.getLineNumber();
+        }
+        int line = frame.getLineNumber();
+        return line > 0 && line < lines.length ? lines[line] : 0;
     }
 
     private static void checkCallDepth() {

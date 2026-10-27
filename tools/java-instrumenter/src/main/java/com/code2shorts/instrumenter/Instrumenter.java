@@ -33,8 +33,9 @@ public final class Instrumenter {
                 throw new UnsupportedConstructException("no top-level type declaration found");
             }
             String className = unit.getTypes().get(0).getNameAsString();
-            new SourceInstrumenter(className).instrument(unit);
-            System.out.print(unit.toString());
+            SourceInstrumenter instrumenter = new SourceInstrumenter(className);
+            instrumenter.instrument(unit);
+            System.out.print(LineMap.apply(unit, instrumenter.origins()));
             System.exit(0);
         } catch (ParseProblemException e) {
             System.err.println("PARSE_ERROR: " + e.getMessage());

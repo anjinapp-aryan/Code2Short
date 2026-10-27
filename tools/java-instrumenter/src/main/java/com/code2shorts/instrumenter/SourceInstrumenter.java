@@ -83,11 +83,33 @@ public final class SourceInstrumenter {
                     "poll", "pollFirst", "pollLast",
                     "removeFirst", "removeLast", "addAll");
 
+    // Phase 8.4.2: the ORIGINAL source line each statement stands for.
+    // Statements from the user's file are recorded before anything is
+    // rewritten; generated ones are recorded where they are built, with the
+    // line of the user statement they were generated for. Identity-keyed:
+    // JavaParser's Node.equals is structural, and two identical generated
+    // statements on different lines must not collide. LineMap turns this
+    // into the printed-line -> original-line table.
+    private final java.util.Map<com.github.javaparser.ast.Node, Integer> origins =
+            new java.util.IdentityHashMap<>();
+
     public SourceInstrumenter(String className) {
         this.className = className;
     }
 
+    public java.util.Map<com.github.javaparser.ast.Node, Integer> origins() {
+        return origins;
+    }
+
+    private <T extends com.github.javaparser.ast.Node> T generated(int line, T node) {
+        origins.put(node, line);
+        return node;
+    }
+
     public void instrument(com.github.javaparser.ast.CompilationUnit unit) {
+        for (Statement original : unit.findAll(Statement.class)) {
+            original.getBegin().ifPresent(position -> origins.put(original, position.line));
+        }
         List<MethodDeclaration> methods = unit.findAll(MethodDeclaration.class);
         for (MethodDeclaration method : methods) {
             if (method.getBody().isEmpty()) {
@@ -128,33 +150,33 @@ public final class SourceInstrumenter {
                 String exprText = returnStmt.getExpression().get().toString();
                 int id = tempCounter++;
                 Statement replacement =
-                        StaticJavaParser.parseStatement(
+                        generated(line, StaticJavaParser.parseStatement(
                                 String.format(
                                         "{ var __c2s_ret_%d = %s; %s.methodExit(\"%s\", %s.repr(__c2s_ret_%d), %d); return __c2s_ret_%d; }",
-                                        id, exprText, TRACE, qualifiedName, TRACE, id, line, id));
+                                        id, exprText, TRACE, qualifiedName, TRACE, id, line, id)));
                 returnStmt.replace(replacement);
             } else {
                 Statement replacement =
-                        StaticJavaParser.parseStatement(
+                        generated(line, StaticJavaParser.parseStatement(
                                 String.format(
                                         "{ %s.methodExit(\"%s\", null, %d); return; }",
-                                        TRACE, qualifiedName, line));
+                                        TRACE, qualifiedName, line)));
                 returnStmt.replace(replacement);
             }
         }
 
         if (isVoid && !endsWithReturnOrThrow(body)) {
             body.addStatement(
-                    StaticJavaParser.parseStatement(
+                    generated(declLine, StaticJavaParser.parseStatement(
                             String.format(
                                     "%s.methodExit(\"%s\", null, %d);",
-                                    TRACE, qualifiedName, declLine)));
+                                    TRACE, qualifiedName, declLine))));
         }
 
         body.addStatement(
                 0,
-                StaticJavaParser.parseStatement(
-                        String.format("%s.methodEnter(\"%s\", %d);", TRACE, qualifiedName, declLine)));
+                generated(declLine, StaticJavaParser.parseStatement(
+                        String.format("%s.methodEnter(\"%s\", %d);", TRACE, qualifiedName, declLine))));
     }
 
     private boolean endsWithReturnOrThrow(BlockStmt body) {
@@ -185,7 +207,7 @@ public final class SourceInstrumenter {
                         + "}\n"
                         + "if (__c2s_failed) { System.exit(1); }\n"
                         + "}";
-        BlockStmt wrapper = StaticJavaParser.parseBlock(template);
+        BlockStmt wrapper = generated(method.getBegin().get().line, StaticJavaParser.parseBlock(template));
         BlockStmt tryBlock =
                 wrapper.findFirst(com.github.javaparser.ast.stmt.TryStmt.class).get().getTryBlock();
         tryBlock.getStatements().clear();
@@ -269,7 +291,7 @@ public final class SourceInstrumenter {
         BlockStmt bodyBlock = asBlock(whileStmt.getBody());
         bodyBlock
                 .getStatements()
-                .add(0, StaticJavaParser.parseStatement(String.format("%s.loopIteration(%d);", TRACE, line)));
+                .add(0, generated(line, StaticJavaParser.parseStatement(String.format("%s.loopIteration(%d);", TRACE, line))));
         whileStmt.setBody(bodyBlock);
         instrumentBlock(bodyBlock);
     }
@@ -305,15 +327,15 @@ public final class SourceInstrumenter {
                     .getStatements()
                     .add(
                             0,
-                            StaticJavaParser.parseStatement(
+                            generated(line, StaticJavaParser.parseStatement(
                                     String.format(
                                             "%s.assign(\"%s\", null, %s.repr(%s), %d);",
-                                            TRACE, name, TRACE, name, line)));
+                                            TRACE, name, TRACE, name, line))));
         }
 
         bodyBlock
                 .getStatements()
-                .add(0, StaticJavaParser.parseStatement(String.format("%s.loopIteration(%d);", TRACE, line)));
+                .add(0, generated(line, StaticJavaParser.parseStatement(String.format("%s.loopIteration(%d);", TRACE, line))));
         forStmt.setBody(bodyBlock);
         instrumentBlock(bodyBlock);
     }
@@ -371,10 +393,10 @@ public final class SourceInstrumenter {
                     out.add(buildArrayRead(init.asArrayAccessExpr(), line));
                 } else {
                     out.add(
-                            StaticJavaParser.parseStatement(
+                            generated(line, StaticJavaParser.parseStatement(
                                     String.format(
                                             "%s.assign(\"%s\", null, %s.repr(%s), %d);",
-                                            TRACE, name, TRACE, name, line)));
+                                            TRACE, name, TRACE, name, line))));
                 }
             }
             return;
@@ -413,21 +435,21 @@ public final class SourceInstrumenter {
                     // exactly like a declare-with-initializer instead.
                     out.add(stmt);
                     out.add(
-                            StaticJavaParser.parseStatement(
+                            generated(line, StaticJavaParser.parseStatement(
                                     String.format(
                                             "%s.assign(\"%s\", null, %s.repr(%s), %d);",
-                                            TRACE, name, TRACE, name, line)));
+                                            TRACE, name, TRACE, name, line))));
                 } else {
                     int id = tempCounter++;
                     out.add(
-                            StaticJavaParser.parseStatement(
-                                    String.format("var __c2s_old_%d = %s.repr(%s);", id, TRACE, name)));
+                            generated(line, StaticJavaParser.parseStatement(
+                                    String.format("var __c2s_old_%d = %s.repr(%s);", id, TRACE, name))));
                     out.add(stmt);
                     out.add(
-                            StaticJavaParser.parseStatement(
+                            generated(line, StaticJavaParser.parseStatement(
                                     String.format(
                                             "%s.assign(\"%s\", __c2s_old_%d, %s.repr(%s), %d);",
-                                            TRACE, name, id, TRACE, name, line)));
+                                            TRACE, name, id, TRACE, name, line))));
                 }
                 return;
             }
@@ -446,14 +468,14 @@ public final class SourceInstrumenter {
                 String name = unary.getExpression().asNameExpr().getNameAsString();
                 int id = tempCounter++;
                 out.add(
-                        StaticJavaParser.parseStatement(
-                                String.format("var __c2s_old_%d = %s.repr(%s);", id, TRACE, name)));
+                        generated(line, StaticJavaParser.parseStatement(
+                                String.format("var __c2s_old_%d = %s.repr(%s);", id, TRACE, name))));
                 out.add(stmt);
                 out.add(
-                        StaticJavaParser.parseStatement(
+                        generated(line, StaticJavaParser.parseStatement(
                                 String.format(
                                         "%s.assign(\"%s\", __c2s_old_%d, %s.repr(%s), %d);",
-                                        TRACE, name, id, TRACE, name, line)));
+                                        TRACE, name, id, TRACE, name, line))));
                 return;
             }
         }
@@ -517,28 +539,28 @@ public final class SourceInstrumenter {
      *  kind and ordering from the actual instance — the declared type
      *  cannot tell us whether a Map is insertion-ordered. */
     private Statement buildCollectionObservation(String name, String operation, int line) {
-        return StaticJavaParser.parseStatement(
+        return generated(line, StaticJavaParser.parseStatement(
                 String.format(
                         "%s.collection(\"%s\", %s, \"%s\", %d);",
-                        TRACE, escape(name), name, escape(operation), line));
+                        TRACE, escape(name), name, escape(operation), line)));
     }
 
     private Statement buildArrayRead(ArrayAccessExpr access, int line) {
         String arrayName = access.getName().toString();
         String indexText = access.getIndex().toString();
-        return StaticJavaParser.parseStatement(
+        return generated(line, StaticJavaParser.parseStatement(
                 String.format(
                         "%s.arrayRead(\"%s\", %s, %s.repr(%s), %d);",
-                        TRACE, arrayName, indexText, TRACE, access.toString(), line));
+                        TRACE, arrayName, indexText, TRACE, access.toString(), line)));
     }
 
     private Statement buildArrayWrite(ArrayAccessExpr access, int line) {
         String arrayName = access.getName().toString();
         String indexText = access.getIndex().toString();
-        return StaticJavaParser.parseStatement(
+        return generated(line, StaticJavaParser.parseStatement(
                 String.format(
                         "%s.arrayWrite(\"%s\", %s, %s.repr(%s), %d);",
-                        TRACE, arrayName, indexText, TRACE, access.toString(), line));
+                        TRACE, arrayName, indexText, TRACE, access.toString(), line)));
     }
 
     private static String escape(String s) {
