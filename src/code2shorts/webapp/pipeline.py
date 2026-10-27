@@ -28,6 +28,7 @@ from code2shorts.narration import (
     TTSProvider,
 )
 from code2shorts.visualization import ManimVideoRenderer
+from code2shorts.visualization.render_gate import GatedRenderer, WeightedGate, render_cost
 from code2shorts.visualization.layout import layout_for
 from code2shorts.workflow import (
     ComposeMediaNode,
@@ -93,6 +94,9 @@ class DefaultPipelineFactory(PipelineFactory):
 
     def __init__(self, settings: Settings | None = None) -> None:
         self._settings = settings or Settings()
+        # ONE gate for every job this factory builds, so concurrent jobs
+        # share the render budget (the web app holds a single factory).
+        self._render_gate = WeightedGate(self._settings.render_budget_units)
 
     def build(self, request: GenerationRequest, output_dir: Path) -> list:
         settings = self._settings
@@ -111,7 +115,10 @@ class DefaultPipelineFactory(PipelineFactory):
             VisualizationPlanNode(provider, provider_name=provider_name, model=model),
             NarrationNode(provider, provider_name=provider_name, model=model),
             NarrationTimingNode(tts_provider=tts, output_dir=output_dir),
-            RenderVideoNode(build_renderer(profile), output_dir=output_dir),
+            RenderVideoNode(
+                GatedRenderer(build_renderer(profile), self._render_gate, render_cost(profile)),
+                output_dir=output_dir,
+            ),
             ComposeMediaNode(
                 tts_provider=tts,
                 composer=MediaComposer(),

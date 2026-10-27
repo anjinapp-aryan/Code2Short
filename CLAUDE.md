@@ -99,9 +99,9 @@ Real, load-bearing code: `core/` (domain models — imports nothing else),
 `trace/` instrumentation glue), `visualization/`, `narration/`, `media/`,
 `workflow/` (nodes, runner, retry, checkpoints), `artifacts/`, `ai/`, `llm/`.
 
-`animation/`, `compose/`, `lessonplan/`, `qa/`, `render/`, `tts/` are empty
-Phase-0 placeholders — their real successors are `visualization/`, `media/`
-and `narration/`. Don't add to the placeholders.
+The empty Phase-0 placeholder packages (`animation/`, `compose/`,
+`lessonplan/`, `qa/`, `render/`, `tts/`) were deleted after Phase 8.3. Their
+real successors are `visualization/`, `media/` and `narration/`.
 
 `tools/java-instrumenter/` is a standalone Maven module (JavaParser) that
 rewrites Java source to emit trace events. It is deliberately outside

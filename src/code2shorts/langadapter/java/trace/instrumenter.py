@@ -54,6 +54,11 @@ class JavaSourceInstrumenter:
         self._jar_path = jar_path or _default_jar_path()
         self._timeout_seconds = timeout_seconds
 
+    @property
+    def jar_path(self) -> Path:
+        """The tool jar. Phase 8.4's SourceStructure main lives in it too."""
+        return self._jar_path
+
     def instrument(self, code: GeneratedCode) -> GeneratedCode:
         """Instrument every src/main/java/**/*.java file in `code`, leaving
         anything else (e.g. src/test/java) untouched, then append the

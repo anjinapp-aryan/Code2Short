@@ -49,6 +49,10 @@ DEFAULT_TRACE_MAX_CALL_DEPTH = 200
 DEFAULT_TRACE_MAX_OUTPUT_BYTES = 1_000_000
 DEFAULT_TRACE_MAX_TRACE_SIZE_EVENTS = 2000
 
+# Phase 8.4: `instrumenter` is the default and the production path; `jdi`
+# is the EXPERIMENTAL cs1302-tracer backend (langadapter/java/jdi/).
+TRACE_BACKENDS = ("instrumenter", "jdi")
+
 
 class JavaAdapter(LanguageAdapter):
     def __init__(
@@ -61,7 +65,21 @@ class JavaAdapter(LanguageAdapter):
         trace_max_call_depth: int = DEFAULT_TRACE_MAX_CALL_DEPTH,
         trace_max_output_bytes: int = DEFAULT_TRACE_MAX_OUTPUT_BYTES,
         trace_max_trace_size_events: int = DEFAULT_TRACE_MAX_TRACE_SIZE_EVENTS,
+        trace_backend: str | None = None,
     ) -> None:
+        from code2shorts.config import get_settings
+
+        settings = get_settings()
+        backend = (trace_backend or settings.java_trace_backend or "instrumenter").strip().lower()
+        if backend not in TRACE_BACKENDS:
+            raise ValueError(
+                f"unknown Java trace backend {backend!r}; expected one of {TRACE_BACKENDS} "
+                "(CODE2SHORTS_JAVA_TRACE_BACKEND)"
+            )
+        self.trace_backend = backend
+        self._jdi_java_home = settings.jdi_java_home
+        self._jdi_tracer_jar = settings.jdi_tracer_jar
+        self._trace_max_trace_size_events = trace_max_trace_size_events
         self._build_timeout_seconds = build_timeout_seconds
         self._execution_timeout_seconds = execution_timeout_seconds
         self._trace_max_events = trace_max_events
@@ -114,6 +132,8 @@ class JavaAdapter(LanguageAdapter):
     def trace(
         self, code: GeneratedCode, workspace: Workspace, input_value: str
     ) -> ExecutionTrace:
+        if self.trace_backend == "jdi":
+            return self._trace_with_jdi(code, workspace, input_value)
         entry_class = JavaWorkspace.main_class_name(code.entry_point)
         algorithm_name = entry_class.rsplit(".", 1)[-1]
 
@@ -179,6 +199,36 @@ class JavaAdapter(LanguageAdapter):
             stdout=execute_result.stdout,
             stderr=execute_result.stderr,
         )
+
+    def _trace_with_jdi(
+        self, code: GeneratedCode, workspace: Workspace, input_value: str
+    ) -> ExecutionTrace:
+        """EXPERIMENTAL. Never falls back to the instrumenter: a missing
+        toolchain is reported as a failed trace naming what to configure."""
+        from code2shorts.langadapter.java.jdi.backend import (
+            JdiBackendUnavailable,
+            JdiToolchain,
+            JdiTraceBackend,
+        )
+
+        try:
+            toolchain = JdiToolchain.resolve(
+                self._jdi_java_home, self._jdi_tracer_jar, self._instrumenter.jar_path
+            )
+        except JdiBackendUnavailable as error:
+            entry_class = JavaWorkspace.main_class_name(code.entry_point)
+            return self._instrumentation_failed_trace(
+                entry_class.rsplit(".", 1)[-1], entry_class, input_value,
+                f"JDI_BACKEND_UNAVAILABLE: {error}",
+            )
+        backend = JdiTraceBackend(
+            toolchain,
+            execution_timeout_seconds=self._execution_timeout_seconds,
+            max_snapshots=self._trace_max_events,
+            max_output_bytes=self._trace_max_output_bytes,
+            max_trace_size_events=self._trace_max_trace_size_events,
+        )
+        return backend.trace(code, workspace, input_value)
 
     def _classify(
         self, execute_result: ExecuteResult, exception, truncated: bool

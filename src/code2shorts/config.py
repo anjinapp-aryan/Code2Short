@@ -311,6 +311,26 @@ class Settings(BaseSettings):
     visualization_max_steps: int = 100
     narration_max_segments: int = 100
     rendering_timeout_seconds: float = 300.0
+    # Concurrent renders, weighted by pixels (HD = 1, 4K = 4). The default
+    # admits 4K + HD at once (~2.4 GiB measured, Phase 8.3) but not two 4K
+    # renders. See visualization/render_gate.py.
+    render_budget_units: int = Field(default=5, ge=1)
+
+    # Phase 8.4: which backend JavaAdapter.trace() uses. "instrumenter" is
+    # the default and the production path. "jdi" is EXPERIMENTAL: the
+    # cs1302-tracer jar over the Java Debug Interface, which needs its own
+    # JDK 21+ (jdi_java_home) while everything else keeps JDK 17. See
+    # docs/PHASE_8_4_JDI_TRACE_PARITY.md.
+    java_trace_backend: str = Field(
+        default="instrumenter",
+        validation_alias=AliasChoices("CODE2SHORTS_JAVA_TRACE_BACKEND", "JAVA_TRACE_BACKEND"),
+    )
+    jdi_java_home: str | None = Field(
+        default=None, validation_alias=AliasChoices("CODE2SHORTS_JDI_JAVA_HOME")
+    )
+    jdi_tracer_jar: str | None = Field(
+        default=None, validation_alias=AliasChoices("CODE2SHORTS_JDI_TRACER_JAR")
+    )
     video_resolution: str = "1080x1920"
     video_fps: int = 30
     output_directory: str = "output"

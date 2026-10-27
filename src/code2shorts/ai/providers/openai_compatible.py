@@ -121,6 +121,7 @@ class OpenAICompatibleProvider(LLMProvider):
                     attempt,
                     len(prompt),
                 )
+                started = time.perf_counter()
                 response = self._completion_fn(
                     model=f"openai/{self._model}",
                     messages=messages,
@@ -143,7 +144,16 @@ class OpenAICompatibleProvider(LLMProvider):
                 content = response.choices[0].message.content
                 if not content:
                     raise OpenAICompatiblePermanentError("endpoint returned an empty response")
-                logger.info("llm response received chars=%d", len(content))
+                # Numbers only: what the request cost and how long it took.
+                usage = getattr(response, "usage", None)
+                logger.info(
+                    "llm response received chars=%d prompt_tokens=%s "
+                    "completion_tokens=%s latency_ms=%d",
+                    len(content),
+                    getattr(usage, "prompt_tokens", None),
+                    getattr(usage, "completion_tokens", None),
+                    (time.perf_counter() - started) * 1000,
+                )
                 return content
             except OpenAICompatibleError:
                 raise
